@@ -34,6 +34,32 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/db-check")
+def db_check(db: Session = Depends(get_db)):
+    """Temporary debug endpoint to diagnose DB connection issues."""
+    import traceback
+    try:
+        from sqlalchemy import text
+        result = db.execute(text("SELECT 1"))
+        val = result.fetchone()
+        # Try listing tables
+        r2 = db.execute(text("SELECT count(*) FROM restaurants"))
+        count = r2.fetchone()[0]
+        return {
+            "status": "ok",
+            "db_url_prefix": settings.database_url[:30] + "...",
+            "select_1": val[0] if val else None,
+            "restaurant_count": count,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)[:500],
+            "traceback": traceback.format_exc()[-800:],
+            "db_url_prefix": settings.database_url[:30] + "..." if hasattr(settings, 'database_url') else "no settings",
+        }
+
+
 # --- Multi-restaurant cart helper ---
 def _build_cart_summary(db: Session, user_id: int) -> dict:
     """Build grouped cart data across all pending orders for a user."""
