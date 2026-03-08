@@ -28,49 +28,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Temp: Capture unhandled exceptions for Vercel debugging ---
-import traceback as _tb
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-
-@app.exception_handler(Exception)
-async def _debug_exception_handler(request: Request, exc: Exception):
-    tb_str = _tb.format_exc()[-500:]
-    return JSONResponse(
-        status_code=500,
-        content={"detail": str(exc)[:300], "traceback": tb_str},
-    )
-
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-@app.get("/db-check")
-def db_check(db: Session = Depends(get_db)):
-    """Temporary debug endpoint to diagnose DB connection issues."""
-    import traceback
-    try:
-        from sqlalchemy import text
-        result = db.execute(text("SELECT 1"))
-        val = result.fetchone()
-        # Try listing tables
-        r2 = db.execute(text("SELECT count(*) FROM restaurants"))
-        count = r2.fetchone()[0]
-        return {
-            "status": "ok",
-            "db_url_prefix": settings.database_url[:30] + "...",
-            "select_1": val[0] if val else None,
-            "restaurant_count": count,
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)[:500],
-            "traceback": traceback.format_exc()[-800:],
-            "db_url_prefix": settings.database_url[:30] + "..." if hasattr(settings, 'database_url') else "no settings",
-        }
 
 
 # --- Multi-restaurant cart helper ---
