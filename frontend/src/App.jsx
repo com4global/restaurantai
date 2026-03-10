@@ -377,45 +377,59 @@ export default function App() {
   const audioContextRef = useRef(null);
   const voiceAudioRef = useRef(null); // for playing TTS audio
 
-  // Speak text via Sarvam TTS — sends to backend, plays returned audio
+  // Speak text — try Sarvam TTS first, fallback to browser speechSynthesis for mobile
   const voiceSpeak = useCallback(async (text, autoListenAfter = true) => {
     if (!text) return;
     // Stop any playing audio
     if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
+    window.speechSynthesis?.cancel();
     setVoiceState("speaking");
+
+    const afterSpeak = () => {
+      if (autoListenAfter && voiceModeRef.current) {
+        voiceStartListening();
+      } else {
+        setVoiceState("idle");
+      }
+    };
+
     try {
       const result = await voiceTTS(text, "en-IN", "kavya");
       if (result.audio_base64) {
         const audio = new Audio(`data:audio/wav;base64,${result.audio_base64}`);
         voiceAudioRef.current = audio;
-        audio.onended = () => {
-          voiceAudioRef.current = null;
-          if (autoListenAfter && voiceModeRef.current) {
-            voiceStartListening();
-          } else {
-            setVoiceState("idle");
-          }
-        };
+        audio.onended = () => { voiceAudioRef.current = null; afterSpeak(); };
         audio.onerror = () => {
           voiceAudioRef.current = null;
-          setVoiceState("idle");
-          if (autoListenAfter && voiceModeRef.current) voiceStartListening();
+          // Fallback: browser speechSynthesis
+          _browserSpeak(text, afterSpeak);
         };
         audio.play().catch(() => {
-          setVoiceState("idle");
-          if (autoListenAfter && voiceModeRef.current) voiceStartListening();
+          // Autoplay blocked on mobile — use browser speech
+          voiceAudioRef.current = null;
+          _browserSpeak(text, afterSpeak);
         });
       } else {
-        // Fallback: if no audio, just continue
-        if (autoListenAfter && voiceModeRef.current) voiceStartListening();
-        else setVoiceState("idle");
+        _browserSpeak(text, afterSpeak);
       }
     } catch (err) {
       console.error("Sarvam TTS error:", err);
-      setVoiceState("idle");
-      if (autoListenAfter && voiceModeRef.current) voiceStartListening();
+      _browserSpeak(text, afterSpeak);
     }
   }, []);
+
+  // Browser speech fallback
+  const _browserSpeak = (text, onDone) => {
+    if (window.speechSynthesis) {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.0;
+      u.onend = onDone;
+      u.onerror = onDone;
+      window.speechSynthesis.speak(u);
+    } else {
+      onDone();
+    }
+  };
 
   // Start listening via browser SpeechRecognition (fast, works on mobile)
   const voiceStartListening = useCallback(() => {
@@ -512,7 +526,14 @@ export default function App() {
     setMessages((p) => [...p, { role: "user", content: text.trim() }]);
     setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
     try {
-      const res = await sendMessage(token, { session_id: sessionId, text: text.trim() });
+      // Ensure restaurant context is synced: if user selected restaurant in UI
+      // but chat session might not have it, prefix with #slug first
+      let finalText = text.trim();
+      if (fromVoice && selectedRestaurant?.slug && !finalText.startsWith('#') && !finalText.startsWith('add:')) {
+        // First sync the restaurant by sending #slug, then send the actual text
+        await sendMessage(token, { session_id: sessionId, text: `#${selectedRestaurant.slug}` });
+      }
+      const res = await sendMessage(token, { session_id: sessionId, text: finalText });
       setSessionId(res.session_id);
       setMessages((p) => [...p, {
         role: "bot", content: res.reply,
