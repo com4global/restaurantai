@@ -561,22 +561,37 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     # --- Browse category by name or id ---
     if lower.startswith("category:") or lower.startswith("browse:"):
         cat_query = cleaned.split(":", 1)[1].strip()
-        categories = crud.list_categories(db, session.restaurant_id)
+        # If session has a restaurant_id, scope to it
+        if session.restaurant_id:
+            categories = crud.list_categories(db, session.restaurant_id)
+        else:
+            categories = []
         match = None
         for cat in categories:
             if str(cat.id) == cat_query or cat.name.lower() == cat_query.lower():
                 match = cat
                 break
+        # Fallback: try to find category by ID directly
+        if not match and cat_query.isdigit():
+            from .models import Category as CatModel
+            direct_cat = db.query(CatModel).filter(CatModel.id == int(cat_query)).first()
+            if direct_cat:
+                match = direct_cat
+                # Also fix the session restaurant_id if it was missing
+                if not session.restaurant_id:
+                    _set_session_state(db, session, restaurant_id=direct_cat.restaurant_id)
+                    categories = crud.list_categories(db, direct_cat.restaurant_id)
         if match:
             items = _items_data(db, match.id)
-            item_list = _build_voice_item_list(items)
+            cats = _categories_data(db, session.restaurant_id or match.restaurant_id)
             return _result(
-                f"{match.name} — {len(items)} items. Tap to add or type what you want!",
+                f"{match.name} — {len(items)} items. Tap + to add or just tell me what you want!",
                 restaurant_id=session.restaurant_id,
                 category_id=match.id,
                 order_id=session.order_id,
+                categories=cats,
                 items=items,
-                voice_prompt=f"In {match.name} we have: {item_list}. What would you like to add?",
+                voice_prompt=f"{match.name}, {len(items)} items. Which one?",
             )
 
     # --- Quick add by item ID (from tapping + button) ---

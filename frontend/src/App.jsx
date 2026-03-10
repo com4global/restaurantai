@@ -376,7 +376,7 @@ export default function App() {
     setVoiceState("speaking");
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
-    utterance.rate = 1.4; // Fast speech
+    utterance.rate = 1.1; // Natural speech speed
     utterance.pitch = 1.0;
     const voices = window.speechSynthesis.getVoices();
     const preferred = voices.find(v => v.name.includes("Samantha") || v.name.includes("Google"));
@@ -484,14 +484,13 @@ export default function App() {
 
       // Voice mode: speak SHORT confirmation, then auto-listen
       if (fromVoice && voiceModeRef.current) {
-        // Build a very short voice reply
         let voiceReply = "";
         if (res.items && res.items.length > 0) {
-          voiceReply = `${res.items.length} items shown. Which one to add?`;
+          voiceReply = `${res.items.length} items. Pick one to add.`;
         } else if (res.categories && res.categories.length > 0) {
-          voiceReply = "Categories loaded. Say a category name.";
+          voiceReply = "Categories loaded. Say a category.";
         } else if (res.reply.toLowerCase().includes("added")) {
-          voiceReply = "Added. Anything else?";
+          voiceReply = "Added! Anything else?";
         } else if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
           voiceReply = "Order placed!";
           // Exit voice mode after order
@@ -520,7 +519,7 @@ export default function App() {
   };
 
   const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
-  const handleCategoryClick = (cat) => { setActiveCategoryName(cat.name); doSend(cat.name); };
+  const handleCategoryClick = (cat) => { setActiveCategoryName(cat.name); doSend(`category:${cat.id}`); };
   const handleAddItem = (item) => {
     setAddedItemId(item.id);
     setTimeout(() => setAddedItemId(null), 500);
