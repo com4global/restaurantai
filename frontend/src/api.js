@@ -147,3 +147,34 @@ export async function fetchMyOrders(token) {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
+
+// --- Sarvam AI Voice APIs ---
+
+export async function voiceSTT(audioBlob) {
+  const formData = new FormData();
+  formData.append("file", audioBlob, "audio.webm");
+  const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const resp = await fetch(`${API}/api/voice/stt`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(text || "STT failed");
+  }
+  return resp.json(); // { transcript, language }
+}
+
+export async function voiceTTS(text, language = "en-IN", speaker = "meera") {
+  const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const resp = await fetch(`${API}/api/voice/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, language, speaker }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(text || "TTS failed");
+  }
+  return resp.json(); // { audio_base64, format }
+}
