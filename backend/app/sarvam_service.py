@@ -77,7 +77,7 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> dict:
 def generate_speech(
     text: str,
     language: str = "en-IN",
-    speaker: str = "meera",
+    speaker: str = "kavya",
 ) -> dict:
     """
     Send text to Sarvam Bulbul v3 TTS.

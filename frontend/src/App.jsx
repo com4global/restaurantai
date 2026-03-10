@@ -381,7 +381,7 @@ export default function App() {
     if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
     setVoiceState("speaking");
     try {
-      const result = await voiceTTS(text, "en-IN", "meera");
+      const result = await voiceTTS(text, "en-IN", "kavya");
       if (result.audio_base64) {
         const audio = new Audio(`data:audio/wav;base64,${result.audio_base64}`);
         voiceAudioRef.current = audio;

@@ -165,7 +165,7 @@ export async function voiceSTT(audioBlob) {
   return resp.json(); // { transcript, language }
 }
 
-export async function voiceTTS(text, language = "en-IN", speaker = "meera") {
+export async function voiceTTS(text, language = "en-IN", speaker = "kavya") {
   const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
   const resp = await fetch(`${API}/api/voice/tts`, {
     method: "POST",
