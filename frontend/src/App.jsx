@@ -188,7 +188,10 @@ export default function App() {
   const [isListening, setIsListening] = useState(false);
   const voiceRecRef = useRef(null);
   const voiceModeRef = useRef(false);
+  const voiceStateRef = useRef("idle");
   const lastVoicePromptRef = useRef(null);
+  // Keep voiceStateRef synced
+  useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
 
   // Owner
   const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
@@ -414,99 +417,69 @@ export default function App() {
     }
   }, []);
 
-  // Start listening via MediaRecorder — records audio, sends to Sarvam STT
-  const voiceStartListening = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  // Start listening via browser SpeechRecognition (fast, works on mobile)
+  const voiceStartListening = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      console.error("SpeechRecognition not supported");
+      setVoiceState("idle");
+      return;
+    }
+    if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch (e) { } }
+
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    voiceRecRef.current = rec;
+
+    rec.onstart = () => {
       setIsListening(true);
       setVoiceState("listening");
       setVoiceTranscript("");
+    };
 
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        setIsListening(false);
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        if (audioBlob.size < 100) {
-          // Too short, re-listen
-          if (voiceModeRef.current) setTimeout(() => voiceStartListening(), 500);
-          else setVoiceState("idle");
-          return;
-        }
-        setVoiceState("processing");
-        setVoiceTranscript("Transcribing...");
-        try {
-          const sttResult = await voiceSTT(audioBlob);
-          const transcript = sttResult.transcript || "";
-          if (transcript.trim()) {
-            setVoiceTranscript(transcript);
-            doSend(transcript, true);
-          } else {
-            setVoiceTranscript("");
-            if (voiceModeRef.current) voiceStartListening();
-            else setVoiceState("idle");
-          }
-        } catch (err) {
-          console.error("Sarvam STT error:", err);
-          setVoiceTranscript("Could not understand");
-          if (voiceModeRef.current) setTimeout(() => voiceStartListening(), 1000);
-          else setVoiceState("idle");
-        }
-      };
-
-      mediaRecorder.start(250); // collect data every 250ms for reliability
-
-      // Auto-stop after 15 seconds max, or detect silence
-      const silenceTimeout = setTimeout(() => {
-        if (mediaRecorder.state === "recording") mediaRecorder.stop();
-      }, 15000);
-
-      // Silence detection using AudioContext
-      try {
-        const audioCtx = new AudioContext();
-        audioContextRef.current = audioCtx;
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 512;
-        source.connect(analyser);
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        let silenceStart = null;
-        let hasSound = false;
-
-        const checkSilence = () => {
-          if (mediaRecorder.state !== "recording") return;
-          analyser.getByteFrequencyData(dataArray);
-          const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-          if (avg > 10) {
-            hasSound = true;
-            silenceStart = null;
-          } else if (hasSound) {
-            if (!silenceStart) silenceStart = Date.now();
-            else if (Date.now() - silenceStart > 2500) {
-              // 2.5s silence after speech = stop
-              clearTimeout(silenceTimeout);
-              if (mediaRecorder.state === "recording") mediaRecorder.stop();
-              audioCtx.close();
-              return;
-            }
-          }
-          requestAnimationFrame(checkSilence);
-        };
-        checkSilence();
-      } catch (e) {
-        // Silence detection not critical, timeout will handle it
+    rec.onresult = (e) => {
+      let finalText = "", interimText = "";
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+        else interimText += e.results[i][0].transcript;
       }
+      setVoiceTranscript(finalText || interimText);
+      if (finalText) {
+        setIsListening(false);
+        setVoiceState("processing");
+        doSend(finalText.trim(), true);
+      }
+    };
 
-    } catch (err) {
-      console.error("Mic access error:", err);
+    rec.onerror = (e) => {
+      console.error("SpeechRecognition error:", e.error);
       setIsListening(false);
+      if (e.error === 'no-speech' && voiceModeRef.current) {
+        // No speech detected, retry
+        setTimeout(() => { if (voiceModeRef.current) voiceStartListening(); }, 500);
+      } else if (e.error === 'aborted') {
+        // Intentionally aborted, do nothing
+      } else {
+        setVoiceTranscript("Mic error: " + e.error);
+        setVoiceState("idle");
+      }
+    };
+
+    rec.onend = () => {
+      setIsListening(false);
+      // If voice mode still active but no final result, restart
+      if (voiceModeRef.current && voiceStateRef.current === "listening") {
+        setTimeout(() => { if (voiceModeRef.current) voiceStartListening(); }, 300);
+      }
+    };
+
+    try {
+      rec.start();
+    } catch (err) {
+      console.error("Failed to start recognition:", err);
       setVoiceState("idle");
     }
   }, []);
@@ -517,9 +490,7 @@ export default function App() {
       voiceModeRef.current = false;
       setVoiceMode(false); setVoiceState("idle"); setVoiceTranscript(""); setIsListening(false);
       if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
+      if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch (e) { } }
     } else {
       voiceModeRef.current = true;
       setVoiceMode(true);
