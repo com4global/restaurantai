@@ -369,18 +369,17 @@ export default function App() {
 
   // ===================== VOICE CONVERSATION MODE =====================
 
-  // Speak text via TTS, then auto-listen when done
+  // Speak short text via TTS — fast rate, non-blocking
   const voiceSpeak = useCallback((text, autoListenAfter = true) => {
     if (!text) return;
     window.speechSynthesis.cancel();
     setVoiceState("speaking");
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
-    utterance.rate = 1.05;
+    utterance.rate = 1.4; // Fast speech
     utterance.pitch = 1.0;
-    // Try to use a natural-sounding voice
     const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v => v.name.includes("Samantha") || v.name.includes("Google") || v.name.includes("Natural"));
+    const preferred = voices.find(v => v.name.includes("Samantha") || v.name.includes("Google"));
     if (preferred) utterance.voice = preferred;
     utterance.onend = () => {
       if (autoListenAfter && voiceModeRef.current) {
@@ -390,11 +389,8 @@ export default function App() {
       }
     };
     utterance.onerror = () => {
-      if (autoListenAfter && voiceModeRef.current) {
-        voiceStartListening();
-      } else {
-        setVoiceState("idle");
-      }
+      setVoiceState("idle");
+      if (autoListenAfter && voiceModeRef.current) voiceStartListening();
     };
     window.speechSynthesis.speak(utterance);
   }, []);
@@ -402,28 +398,19 @@ export default function App() {
   // Start listening for speech
   const voiceStartListening = useCallback(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { alert("Voice not supported. Use Chrome."); return; }
+    if (!SR) return;
     if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch { } }
     const rec = new SR();
     rec.lang = "en-US";
     rec.continuous = false;
     rec.interimResults = true;
-    rec.maxAlternatives = 1;
     voiceRecRef.current = rec;
-    rec.onstart = () => {
-      setIsListening(true);
-      setVoiceState("listening");
-      setVoiceTranscript("");
-    };
+    rec.onstart = () => { setIsListening(true); setVoiceState("listening"); setVoiceTranscript(""); };
     rec.onresult = (e) => {
-      let finalText = "";
-      let interimText = "";
+      let finalText = "", interimText = "";
       for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          finalText += e.results[i][0].transcript;
-        } else {
-          interimText += e.results[i][0].transcript;
-        }
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+        else interimText += e.results[i][0].transcript;
       }
       setVoiceTranscript(finalText || interimText);
       if (finalText) {
@@ -434,64 +421,36 @@ export default function App() {
     };
     rec.onerror = (e) => {
       setIsListening(false);
-      // If the error is 'no-speech', try listening again
       if (e.error === 'no-speech' && voiceModeRef.current) {
-        setTimeout(() => {
-          if (voiceModeRef.current) voiceStartListening();
-        }, 300);
+        setTimeout(() => { if (voiceModeRef.current) voiceStartListening(); }, 500);
       } else {
-        setVoiceState("idle");
+        setVoiceState(voiceModeRef.current ? "idle" : "idle");
       }
     };
-    rec.onend = () => {
-      setIsListening(false);
-      // If voice mode is still on and we didn't get a result, re-listen
-      if (voiceModeRef.current && voiceState === "listening") {
-        setTimeout(() => {
-          if (voiceModeRef.current) voiceStartListening();
-        }, 300);
-      }
-    };
+    rec.onend = () => { setIsListening(false); };
     rec.start();
-  }, [voiceState]);
+  }, []);
 
-  // Toggle Voice Conversation Mode on/off
+  // Toggle voice mode
   const toggleVoiceMode = useCallback(() => {
     if (voiceMode) {
-      // Turn OFF
       voiceModeRef.current = false;
-      setVoiceMode(false);
-      setVoiceState("idle");
-      setVoiceTranscript("");
-      setIsListening(false);
+      setVoiceMode(false); setVoiceState("idle"); setVoiceTranscript(""); setIsListening(false);
       window.speechSynthesis.cancel();
       if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch { } }
     } else {
-      // Turn ON
       voiceModeRef.current = true;
       setVoiceMode(true);
-      // Determine initial prompt based on state
-      let initialPrompt;
-      if (!selectedRestaurant) {
-        initialPrompt = "Which restaurant would you like to order from?";
-      } else if (activeCategories.length > 0 && currentItems.length === 0) {
-        const catNames = activeCategories.slice(0, 5).map(c => c.name).join(", ");
-        initialPrompt = `You're at ${selectedRestaurant.name}. Categories are: ${catNames}. Which one would you like?`;
-      } else if (currentItems.length > 0) {
-        initialPrompt = "What item would you like to add? Say the item name.";
-      } else if (lastVoicePromptRef.current) {
-        initialPrompt = lastVoicePromptRef.current;
-      } else {
-        initialPrompt = "Hi! What would you like to order?";
-      }
-      voiceSpeak(initialPrompt, true);
+      // Short initial prompt based on state
+      let prompt;
+      if (!selectedRestaurant) prompt = "Which restaurant?";
+      else if (currentItems.length > 0) prompt = "Which item to add?";
+      else prompt = "Say a category name.";
+      voiceSpeak(prompt, true);
     }
-  }, [voiceMode, selectedRestaurant, activeCategories, currentItems, voiceSpeak]);
+  }, [voiceMode, selectedRestaurant, currentItems, voiceSpeak]);
 
-  // Legacy: simple one-shot mic for non-voice-mode
-  const startListening = () => {
-    toggleVoiceMode();
-  };
+  const startListening = () => { toggleVoiceMode(); };
 
   // ===================== CHAT / SEND =====================
 
@@ -507,7 +466,6 @@ export default function App() {
         categories: res.categories || null,
         items: res.items || null,
       }]);
-      // Update categories but DON'T clear items if items also came back
       if (res.categories && res.categories.length > 0) {
         setActiveCategories(res.categories);
         if (!res.items || res.items.length === 0) {
@@ -515,7 +473,6 @@ export default function App() {
           setCurrentItems([]);
         }
       }
-      // Set items if returned
       if (res.items && res.items.length > 0) {
         setCurrentItems(res.items);
         setActiveCategoryName(text.trim());
@@ -525,31 +482,39 @@ export default function App() {
         setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
       }
 
-      // Voice Conversation Mode: speak the voice_prompt and continue loop
-      if (res.voice_prompt) lastVoicePromptRef.current = res.voice_prompt;
-      if (fromVoice && voiceModeRef.current && res.voice_prompt) {
-        // Check for exit phrases
-        const exitPhrases = ["thank you", "order has been placed", "order has been sent"];
-        const shouldExit = exitPhrases.some(p => res.voice_prompt.toLowerCase().includes(p));
-        voiceSpeak(res.voice_prompt, !shouldExit);
-        if (shouldExit) {
+      // Voice mode: speak SHORT confirmation, then auto-listen
+      if (fromVoice && voiceModeRef.current) {
+        // Build a very short voice reply
+        let voiceReply = "";
+        if (res.items && res.items.length > 0) {
+          voiceReply = `${res.items.length} items shown. Which one to add?`;
+        } else if (res.categories && res.categories.length > 0) {
+          voiceReply = "Categories loaded. Say a category name.";
+        } else if (res.reply.toLowerCase().includes("added")) {
+          voiceReply = "Added. Anything else?";
+        } else if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
+          voiceReply = "Order placed!";
+          // Exit voice mode after order
           setTimeout(() => {
             voiceModeRef.current = false;
-            setVoiceMode(false);
-            setVoiceState("idle");
-          }, 3000);
+            setVoiceMode(false); setVoiceState("idle");
+          }, 2000);
+        } else {
+          voiceReply = "Got it. What next?";
         }
+        voiceSpeak(voiceReply, !res.reply.toLowerCase().includes("submitted"));
       }
 
       setStatus("Ready.");
     } catch (err) {
+      // Clear processing state immediately
+      setVoiceState(voiceModeRef.current ? "idle" : "idle");
       if (err.status === 401) {
         localStorage.removeItem("token"); setToken(null);
         setStatus("Session expired. Please log in again.");
       } else { setStatus(err.message || "Failed."); }
-      // If in voice mode, inform and re-listen
       if (fromVoice && voiceModeRef.current) {
-        voiceSpeak("Something went wrong. Please try again.", true);
+        voiceSpeak("Error. Try again.", true);
       }
     }
   };
@@ -907,33 +872,15 @@ export default function App() {
                     ) : null;
                   })()}
 
-                  {/* Voice Conversation Mode UI */}
+                  {/* Compact voice status bar (non-blocking) */}
                   {voiceMode && (
-                    <div className="voice-conversation-panel">
-                      <div className={`voice-orb ${voiceState}`}>
-                        <div className="voice-orb-ring" />
-                        <div className="voice-orb-ring delay" />
-                        <div className="voice-orb-icon">
-                          {voiceState === "speaking" ? "🔊" : voiceState === "listening" ? "🎙️" : voiceState === "processing" ? "⏳" : "🎤"}
-                        </div>
-                      </div>
-                      <div className="voice-state-label">
-                        {voiceState === "speaking" ? "Speaking..." : voiceState === "listening" ? "Listening..." : voiceState === "processing" ? "Processing..." : "Voice Mode"}
-                      </div>
-                      {voiceTranscript && (
-                        <div className="voice-transcript">
-                          <span className="voice-transcript-label">You said:</span> {voiceTranscript}
-                        </div>
-                      )}
-                      <button className="voice-stop-btn" onClick={toggleVoiceMode}>✕ End Voice Chat</button>
-                    </div>
-                  )}
-
-                  {/* Voice indicator (legacy fallback) */}
-                  {isListening && !voiceMode && (
-                    <div className="voice-indicator">
-                      <div className="voice-wave"><span></span><span></span><span></span><span></span><span></span></div>
-                      <span>Listening...</span>
+                    <div className="voice-status-bar">
+                      <div className={`voice-dot ${voiceState}`} />
+                      <span className="voice-status-text">
+                        {voiceState === "speaking" ? "🔊 Speaking..." : voiceState === "listening" ? "🎙️ Listening..." : voiceState === "processing" ? "⏳ Processing..." : "🎤 Voice On"}
+                      </span>
+                      {voiceTranscript && <span className="voice-heard">“{voiceTranscript}”</span>}
+                      <button className="voice-end-btn" onClick={toggleVoiceMode}>✕</button>
                     </div>
                   )}
 
@@ -941,9 +888,9 @@ export default function App() {
                   <form onSubmit={handleSend} className="ai-chat-input-row" style={{ position: 'relative' }}>
                     <input ref={inputRef} className="ai-chat-input" value={messageText}
                       onChange={handleInputChange} onKeyDown={handleKeyDown}
-                      placeholder={voiceMode ? "Voice mode active — speak or type..." : isListening ? "Listening..." : "Type # for restaurants, or ask anything..."} />
-                    <button type="button" className={`mic-btn ${voiceMode ? "voice-active" : ""} ${isListening ? "listening" : ""}`} onClick={toggleVoiceMode}
-                      title={voiceMode ? "End voice conversation" : "Start voice conversation"}>
+                      placeholder={voiceMode ? "Voice active — speak or type..." : "Type # for restaurants, or ask anything..."} />
+                    <button type="button" className={`mic-btn ${voiceMode ? "voice-active" : ""}`} onClick={toggleVoiceMode}
+                      title={voiceMode ? "End voice mode" : "Start voice mode"}>
                       {voiceMode ? "🔴" : "🎤"}
                     </button>
                     <button type="submit" className="send-btn">➤</button>
