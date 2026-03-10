@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri": "tauri"
   },
   "dependencies": {
     "framer-motion": "^12.35.0",
@@ -14,6 +15,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.27",
     "postcss": "^8.5.8",

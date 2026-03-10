@@ -23,7 +23,7 @@ const FOOD_EMOJI_MAP = [
   [/rice|fried rice|biryani|risotto/i, "🍚"],
   [/pasta|spaghetti|penne|linguine|fettuccine|mac/i, "🍝"],
   [/sandwich|sub|panini|club|blt|hoagie/i, "🥪"],
-  [/bread|toast|baguette|roll|biscuit|garlic bread/i, "🍞"],
+  [/bread|toast|baguette|roll|biscuit|garlic bread|naan/i, "🍞"],
   [/cake|cheesecake|brownie|tiramisu/i, "🍰"],
   [/ice cream|gelato|sundae|frozen/i, "🍨"],
   [/cookie|biscuit/i, "🍪"],
@@ -60,22 +60,94 @@ function getFoodEmoji(name = "", category = "") {
   return "🍽️";
 }
 
+// Distinct gradient colors for restaurant cards
+const CARD_GRADIENTS = [
+  ['#1a1a2e', '#e94560'],
+  ['#0f3460', '#16213e'],
+  ['#2d132c', '#ee4c7c'],
+  ['#1b262c', '#0f4c75'],
+  ['#1a1a40', '#7952b3'],
+  ['#0d1117', '#238636'],
+  ['#1e1e3f', '#e07c24'],
+  ['#162447', '#1f4068'],
+  ['#2c003e', '#d4418e'],
+  ['#0a192f', '#64ffda'],
+];
+
+// Smart restaurant → image mapping
+const RESTAURANT_IMAGE_MAP = [
+  [/desi|district|indian/i, '/food-images/food_indian_thali.png'],
+  [/triveni|supermarket|grocery/i, '/food-images/food_indian_grocery.png'],
+  [/bbq|barbecue|southern|grill|smoke/i, '/food-images/food_bbq_platter.png'],
+  [/thai|orchid|pad|pho/i, '/food-images/food_thai_spread.png'],
+  [/domino|pizza|hut|papa/i, '/food-images/food_pizza_fresh.png'],
+  [/aroma|italian|pasta|olive/i, '/food-images/food_italian_aroma.png'],
+];
+
+function getRestaurantImage(name = '') {
+  const text = name.toLowerCase();
+  for (const [regex, img] of RESTAURANT_IMAGE_MAP) {
+    if (regex.test(text)) return img;
+  }
+  return null; // falls back to gradient
+}
+
+// Smart food item/category → image mapping
+const FOOD_IMAGE_MAP = [
+  [/biryani|biriyani|pulao|pulav|rice|fried rice/i, '/food-images/food_biryani.png'],
+  [/snack|samosa|pakora|chaat|appetizer|starter|bhaji|pani puri|bhel/i, '/food-images/food_snacks_plate.png'],
+  [/curry|masala|tikka|butter chicken|paneer|dal|gravy|korma|vindaloo/i, '/food-images/food_curry_bowl.png'],
+  [/naan|bread|roti|paratha|kulcha|garlic|chapati|puri/i, '/food-images/food_naan_bread.png'],
+  [/dessert|sweet|gulab|jalebi|kheer|halwa|rasgulla|cake|mithai/i, '/food-images/food_desserts_indian.png'],
+  [/drink|lassi|chai|tea|coffee|juice|beverage|smoothie|milkshake/i, '/food-images/food_drinks_lassi.png'],
+  [/falooda|faluda/i, '/food-images/food_falooda.png'],
+  [/frankie|kathi|roll|wrap/i, '/food-images/food_frankie_wrap.png'],
+  [/tiffin|breakfast|dosa|idli|vada|upma|uttapam|poha/i, '/food-images/food_tiffin_breakfast.png'],
+  [/indo.?chinese|chinese|manchurian|hakka|noodle|chilli|gobi|schezwan/i, '/food-images/food_indo_chinese.png'],
+  [/chat(?!.*bot)|chaat|puri|sev|papdi|bhel/i, '/food-images/food_chaat_street.png'],
+  [/burger|hamburger|cheeseburger/i, '/food-images/food_burger_desi.png'],
+  [/combo|meal|deal|buy 1|bogo|value|offer/i, '/food-images/food_combo_meal.png'],
+  [/pizza|pie|margherita|pepperoni/i, '/food-images/food_pizza_fresh.png'],
+  [/bbq|ribs|brisket|pulled|smoked|barbecue/i, '/food-images/food_bbq_platter.png'],
+  [/thai|pad|spring roll|tom yum/i, '/food-images/food_thai_spread.png'],
+  [/pasta|spaghetti|fettuccine|penne|italian/i, '/food-images/food_italian_aroma.png'],
+  [/platter|special|friday|ramadan|festiv|feast/i, '/food-images/food_indian_thali.png'],
+  [/new|categor|misc|other/i, '/food-images/food_indian_thali.png'],
+];
+
+function getFoodItemImage(name = '', category = '') {
+  const text = `${name} ${category}`.toLowerCase();
+  for (const [regex, img] of FOOD_IMAGE_MAP) {
+    if (regex.test(text)) return img;
+  }
+  return null; // falls back to emoji
+}
+
 const welcomeMsg = {
   role: "bot",
-  content: "Hello! Set your location above, then type # to pick a restaurant.",
+  content: "Hello! Pick a restaurant from the Home tab, then browse menus and add items here.",
 };
 
 export default function App() {
+  // Active tab
+  const [tab, setTab] = useState("home");
+
+  // Auth
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState(localStorage.getItem("token") || "");
+  const [status, setStatus] = useState("Ready.");
+
+  // Chat
   const [messageText, setMessageText] = useState("");
   const [messages, setMessages] = useState([welcomeMsg]);
   const [sessionId, setSessionId] = useState(null);
+
+  // Restaurants
   const [restaurants, setRestaurants] = useState([]);
   const [nearbyPlaces, setNearbyPlaces] = useState([]);
-  const [status, setStatus] = useState("Ready.");
+  const [selectedRestaurant, setSelectedRestaurant] = useState(null);
 
   // Location state
   const [zipcode, setZipcode] = useState(localStorage.getItem("zipcode") || "");
@@ -89,48 +161,48 @@ export default function App() {
   const [showCitySuggestions, setShowCitySuggestions] = useState(false);
   const citySearchTimeout = useRef(null);
 
+  // Categories & Menu items
+  const [activeCategories, setActiveCategories] = useState([]);
+  const [activeCategoryName, setActiveCategoryName] = useState(null);
+  const [currentItems, setCurrentItems] = useState([]);
+
   // Autocomplete
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [filteredRestaurants, setFilteredRestaurants] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   // Cart
-  const [cartData, setCartData] = useState(null); // { restaurants: [...], grand_total_cents: 0 }
+  const [cartData, setCartData] = useState(null);
   const [showCartPanel, setShowCartPanel] = useState(false);
   const [checkingOut, setCheckingOut] = useState(false);
   const [checkoutDone, setCheckoutDone] = useState(null);
 
-  // Order tracking
+  // Orders
   const [myOrders, setMyOrders] = useState([]);
-  const [showOrderTracker, setShowOrderTracker] = useState(false);
+  const [ordersTab, setOrdersTab] = useState("current");
 
   // Voice
   const [isListening, setIsListening] = useState(false);
 
-  // Owner Portal
-  const [showOwnerPortal, setShowOwnerPortal] = useState(() => {
-    return localStorage.getItem("userRole") === "owner";
-  });
+  // Owner
+  const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
   const [userRole, setUserRole] = useState(() => localStorage.getItem("userRole") || "customer");
 
-  // Sticky category sidebar
-  const [activeCategories, setActiveCategories] = useState([]);
-  const [activeCategoryName, setActiveCategoryName] = useState(null);
-
+  // Refs
   const inputRef = useRef(null);
   const chatEndRef = useRef(null);
+  const [addedItemId, setAddedItemId] = useState(null);
+
+  // ===================== EFFECTS =====================
 
   useEffect(() => {
     if (token) {
       localStorage.setItem("token", token);
-      // Load cart on login
       fetchCart(token).then(setCartData).catch(() => { });
-      // Load orders on login
       fetchMyOrders(token).then(setMyOrders).catch(() => { });
     }
   }, [token]);
 
-  // Poll for order status updates every 15s
   useEffect(() => {
     if (!token || showOwnerPortal) return;
     const interval = setInterval(() => {
@@ -139,79 +211,50 @@ export default function App() {
     return () => clearInterval(interval);
   }, [token, showOwnerPortal]);
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
-  // Fetch restaurants when location changes
-  const fetchRestaurants = useCallback(async (lat, lng, r) => {
+  // Fetch restaurants
+  const fetchRestaurantsData = useCallback(async (lat, lng, r) => {
     try {
       const params = {};
-      if (lat != null && lng != null) {
-        params.lat = lat;
-        params.lng = lng;
-        params.radius_miles = r;
-      }
+      if (lat != null && lng != null) { params.lat = lat; params.lng = lng; params.radius_miles = r; }
       const data = await listRestaurants(params);
       setRestaurants(data);
-
-      // Also fetch real nearby restaurants from OpenStreetMap
       if (lat != null && lng != null) {
         try {
           const nearby = await fetchNearby({ lat, lng, radius_miles: r });
           setNearbyPlaces(nearby);
-        } catch {
-          setNearbyPlaces([]);
-        }
+        } catch { setNearbyPlaces([]); }
       }
-    } catch {
-      setRestaurants([]);
-    }
+    } catch { setRestaurants([]); }
   }, []);
 
   // Auto-detect location on mount
   useEffect(() => {
-    // Try saved zipcode first
     const savedZip = localStorage.getItem("zipcode");
-    if (savedZip) {
-      setZipcode(savedZip);
-      lookupZipcodeAuto(savedZip);
-      return;
-    }
-
-    // Otherwise, auto-detect via GPS
+    if (savedZip) { setZipcode(savedZip); lookupZipcodeAuto(savedZip); return; }
     if (navigator.geolocation) {
-      setLocating(true);
-      setLocationLabel("Detecting location...");
+      setLocating(true); setLocationLabel("Detecting...");
       navigator.geolocation.getCurrentPosition(
         async (pos) => {
-          const lat = pos.coords.latitude;
-          const lng = pos.coords.longitude;
-          setUserLat(lat);
-          setUserLng(lng);
-          // Reverse geocode to get city name
+          const lat = pos.coords.latitude, lng = pos.coords.longitude;
+          setUserLat(lat); setUserLng(lng);
           try {
             const res = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`);
             const geo = await res.json();
             setLocationLabel(`${geo.city || geo.locality || ""}, ${geo.principalSubdivisionCode || geo.countryCode || ""}`);
-          } catch {
-            setLocationLabel(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-          }
-          await fetchRestaurants(lat, lng, radius);
+          } catch { setLocationLabel(`${lat.toFixed(2)}, ${lng.toFixed(2)}`); }
+          await fetchRestaurantsData(lat, lng, radius);
           setLocating(false);
         },
-        () => {
-          // User denied or error — show all restaurants
-          setLocationLabel("");
-          fetchRestaurants(null, null, radius);
-          setLocating(false);
-        },
+        () => { setLocationLabel(""); fetchRestaurantsData(null, null, radius); setLocating(false); },
         { timeout: 5000 }
       );
-    } else {
-      fetchRestaurants(null, null, radius);
-    }
+    } else { fetchRestaurantsData(null, null, radius); }
   }, []);
 
-  // Helper for auto-loading saved zipcode (no state setter for setLocating race)
   const lookupZipcodeAuto = async (zip) => {
     setLocating(true);
     try {
@@ -219,21 +262,17 @@ export default function App() {
       if (!res.ok) throw new Error();
       const data = await res.json();
       const place = data.places[0];
-      const lat = parseFloat(place.latitude);
-      const lng = parseFloat(place.longitude);
-      setUserLat(lat);
-      setUserLng(lng);
+      const lat = parseFloat(place.latitude), lng = parseFloat(place.longitude);
+      setUserLat(lat); setUserLng(lng);
       const cityLabel = `${place["place name"]}, ${place["state abbreviation"]}`;
-      setLocationLabel(cityLabel);
-      setCitySearch(cityLabel);
-      await fetchRestaurants(lat, lng, radius);
-    } catch {
-      fetchRestaurants(null, null, radius);
-    }
+      setLocationLabel(cityLabel); setCitySearch(cityLabel);
+      await fetchRestaurantsData(lat, lng, radius);
+    } catch { fetchRestaurantsData(null, null, radius); }
     setLocating(false);
   };
 
-  // --- Location functions ---
+  // ===================== LOCATION =====================
+
   const lookupZipcode = async (zip) => {
     if (!zip || zip.length < 5) return;
     setLocating(true);
@@ -242,43 +281,27 @@ export default function App() {
       if (!res.ok) throw new Error("Invalid zipcode");
       const data = await res.json();
       const place = data.places[0];
-      const lat = parseFloat(place.latitude);
-      const lng = parseFloat(place.longitude);
-      setUserLat(lat);
-      setUserLng(lng);
+      const lat = parseFloat(place.latitude), lng = parseFloat(place.longitude);
+      setUserLat(lat); setUserLng(lng);
       const cityLabel = `${place["place name"]}, ${place["state abbreviation"]}`;
-      setLocationLabel(cityLabel);
-      setCitySearch(cityLabel);
-      localStorage.setItem("zipcode", zip);
-      localStorage.setItem("radius", radius);
-      await fetchRestaurants(lat, lng, radius);
-    } catch {
-      setLocationLabel("Invalid zipcode");
-    }
+      setLocationLabel(cityLabel); setCitySearch(cityLabel);
+      localStorage.setItem("zipcode", zip); localStorage.setItem("radius", radius);
+      await fetchRestaurantsData(lat, lng, radius);
+    } catch { setLocationLabel("Invalid zipcode"); }
     setLocating(false);
   };
 
-  // Auto-trigger zipcode lookup when 5 digits entered
   const handleZipcodeChange = (val) => {
     const cleaned = val.replace(/\D/g, "").slice(0, 5);
     setZipcode(cleaned);
-    if (cleaned.length === 5) {
-      lookupZipcode(cleaned);
-    }
+    if (cleaned.length === 5) lookupZipcode(cleaned);
   };
 
-  // --- City search with suggestions ---
   const searchCity = async (query) => {
-    if (!query || query.length < 2) {
-      setCitySuggestions([]);
-      return;
-    }
+    if (!query || query.length < 2) { setCitySuggestions([]); return; }
     try {
-      // Search US cities via postal API (try multiple states)
-      const states = ["SC", "NC", "GA", "VA", "FL", "TX", "CA", "NY", "PA", "OH", "IL", "NJ", "MA"];
       const results = [];
-      const seenZips = new Set();
-      // Use the Nominatim (OpenStreetMap) geocoder for city search
+      const seenKeys = new Set();
       const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)},US&format=json&addressdetails=1&limit=6&countrycodes=us`);
       if (res.ok) {
         const data = await res.json();
@@ -289,24 +312,15 @@ export default function App() {
           const postcode = addr.postcode || "";
           const zip5 = postcode.split("-")[0].split(" ")[0];
           const key = `${city}-${state}-${zip5}`;
-          if (city && !seenZips.has(key)) {
-            seenZips.add(key);
-            results.push({
-              city,
-              state,
-              zipcode: zip5,
-              lat: parseFloat(item.lat),
-              lng: parseFloat(item.lon),
-              display: `${city}, ${state}${zip5 ? " · " + zip5 : ""}`
-            });
+          if (city && !seenKeys.has(key)) {
+            seenKeys.add(key);
+            results.push({ city, state, zipcode: zip5, lat: parseFloat(item.lat), lng: parseFloat(item.lon), display: `${city}, ${state}${zip5 ? " · " + zip5 : ""}` });
           }
         }
       }
       setCitySuggestions(results.slice(0, 5));
       setShowCitySuggestions(results.length > 0);
-    } catch {
-      setCitySuggestions([]);
-    }
+    } catch { setCitySuggestions([]); }
   };
 
   const handleCitySearchChange = (val) => {
@@ -319,58 +333,45 @@ export default function App() {
     setZipcode(suggestion.zipcode || "");
     setCitySearch(`${suggestion.city}, ${suggestion.state}`);
     setLocationLabel(`${suggestion.city}, ${suggestion.state}`);
-    setUserLat(suggestion.lat);
-    setUserLng(suggestion.lng);
+    setUserLat(suggestion.lat); setUserLng(suggestion.lng);
     setShowCitySuggestions(false);
     if (suggestion.zipcode) localStorage.setItem("zipcode", suggestion.zipcode);
     localStorage.setItem("radius", radius);
-    await fetchRestaurants(suggestion.lat, suggestion.lng, radius);
+    await fetchRestaurantsData(suggestion.lat, suggestion.lng, radius);
   };
 
   const useMyLocation = () => {
-    if (!navigator.geolocation) {
-      setLocationLabel("Geolocation not supported");
-      return;
-    }
+    if (!navigator.geolocation) { setLocationLabel("Not supported"); return; }
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        setUserLat(lat);
-        setUserLng(lng);
+        const lat = pos.coords.latitude, lng = pos.coords.longitude;
+        setUserLat(lat); setUserLng(lng);
         setLocationLabel(`${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-        await fetchRestaurants(lat, lng, radius);
+        await fetchRestaurantsData(lat, lng, radius);
         setLocating(false);
       },
-      () => {
-        setLocationLabel("Location denied");
-        setLocating(false);
-      }
+      () => { setLocationLabel("Location denied"); setLocating(false); }
     );
   };
 
   const handleRadiusChange = async (newRadius) => {
     setRadius(newRadius);
     localStorage.setItem("radius", newRadius);
-    if (userLat != null && userLng != null) {
-      await fetchRestaurants(userLat, userLng, newRadius);
-    }
+    if (userLat != null && userLng != null) await fetchRestaurantsData(userLat, userLng, newRadius);
   };
 
-  // --- Voice ---
+  // ===================== VOICE =====================
+
   const startListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { alert("Voice not supported. Use Chrome."); return; }
     const rec = new SR();
-    rec.lang = "en-US";
-    rec.continuous = false;
-    rec.interimResults = false;
+    rec.lang = "en-US"; rec.continuous = false; rec.interimResults = false;
     rec.onstart = () => setIsListening(true);
     rec.onresult = (e) => {
       const text = e.results[0][0].transcript;
-      setMessageText(text);
-      setIsListening(false);
+      setMessageText(text); setIsListening(false);
       setTimeout(() => doSend(text), 200);
     };
     rec.onerror = () => setIsListening(false);
@@ -378,13 +379,12 @@ export default function App() {
     rec.start();
   };
 
-  // --- Send ---
+  // ===================== CHAT / SEND =====================
+
   const doSend = async (text) => {
     if (!text.trim()) return;
     setMessages((p) => [...p, { role: "user", content: text.trim() }]);
-    setMessageText("");
-    setShowSuggestions(false);
-    setStatus("Thinking...");
+    setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
     try {
       const res = await sendMessage(token, { session_id: sessionId, text: text.trim() });
       setSessionId(res.session_id);
@@ -393,94 +393,85 @@ export default function App() {
         categories: res.categories || null,
         items: res.items || null,
       }]);
-      // Capture categories for sticky sidebar
+      // Update categories but DON'T clear items if items also came back
       if (res.categories && res.categories.length > 0) {
         setActiveCategories(res.categories);
-        setActiveCategoryName(null);
+        if (!res.items || res.items.length === 0) {
+          setActiveCategoryName(null);
+          setCurrentItems([]);
+        }
       }
-      // Track which category is active
+      // Set items if returned
       if (res.items && res.items.length > 0) {
+        setCurrentItems(res.items);
         setActiveCategoryName(text.trim());
       }
-      // Update cart from cart_summary if present
-      if (res.cart_summary) {
-        setCartData(res.cart_summary);
-      }
-      // Always refresh cart from server after add commands
+      if (res.cart_summary) setCartData(res.cart_summary);
       if (text.trim().startsWith("add:")) {
-        setTimeout(() => {
-          fetchCart(token).then(setCartData).catch(() => { });
-        }, 300);
+        setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
       }
       setStatus("Ready.");
     } catch (err) {
       if (err.status === 401) {
-        localStorage.removeItem("token");
-        setToken(null);
+        localStorage.removeItem("token"); setToken(null);
         setStatus("Session expired. Please log in again.");
-      } else {
-        setStatus(err.message || "Failed.");
-      }
+      } else { setStatus(err.message || "Failed."); }
     }
   };
 
   const handleSend = (e) => { e.preventDefault(); doSend(messageText); };
   const handleCategoryClick = (cat) => { setActiveCategoryName(cat.name); doSend(cat.name); };
-  const handleAddItem = (item) => doSend(`add:${item.id}:1`);
+  const handleAddItem = (item) => {
+    setAddedItemId(item.id);
+    setTimeout(() => setAddedItemId(null), 500);
+    doSend(`add:${item.id}:1`);
+  };
 
-  // --- # autocomplete ---
+  // ===================== RESTAURANT SELECTION =====================
+
+  const selectRestaurant = (r) => {
+    setSelectedRestaurant(r);
+    setShowSuggestions(false);
+    setTab("chat");
+    doSend(`#${r.slug}`);
+  };
+
   const handleInputChange = (e) => {
     const val = e.target.value;
     setMessageText(val);
     if (val.startsWith("#")) {
       const q = val.slice(1).toLowerCase();
-      // Combine partnered + nearby
       const partnered = restaurants.filter(
         (r) => r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)
       ).map((r) => ({ ...r, partnered: true }));
-
       const nearby = nearbyPlaces.filter(
         (r) => r.name.toLowerCase().includes(q)
-      ).map((r) => ({
-        ...r,
-        slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
-        partnered: false,
-      }));
-
+      ).map((r) => ({ ...r, slug: r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), partnered: false }));
       const combined = [...partnered, ...nearby];
       setFilteredRestaurants(combined);
       setShowSuggestions(combined.length > 0);
       setSelectedIndex(0);
-    } else {
-      setShowSuggestions(false);
-    }
+    } else { setShowSuggestions(false); }
   };
 
   const handleKeyDown = (e) => {
-    if (!showSuggestions) {
-      if (e.key === "Enter") { e.preventDefault(); handleSend(e); }
-      return;
-    }
+    if (!showSuggestions) { if (e.key === "Enter") { e.preventDefault(); handleSend(e); } return; }
     if (e.key === "ArrowDown") { e.preventDefault(); setSelectedIndex((i) => (i + 1) % filteredRestaurants.length); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setSelectedIndex((i) => (i - 1 + filteredRestaurants.length) % filteredRestaurants.length); }
     else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); if (filteredRestaurants[selectedIndex]) selectRestaurant(filteredRestaurants[selectedIndex]); }
     else if (e.key === "Escape") setShowSuggestions(false);
   };
 
-  const selectRestaurant = (r) => { setShowSuggestions(false); doSend(`#${r.slug}`); };
+  // ===================== AUTH =====================
 
   const handleAuth = async (e) => {
-    e.preventDefault();
-    setStatus("Signing in...");
+    e.preventDefault(); setStatus("Signing in...");
     try {
       const res = mode === "login" ? await login({ email, password }) : await register({ email, password });
       setToken(res.access_token);
       const role = res.role || "customer";
-      setUserRole(role);
-      localStorage.setItem("userRole", role);
-      if (role === "owner" || role === "admin") {
-        setShowOwnerPortal(true);
-      }
+      setUserRole(role); localStorage.setItem("userRole", role);
+      if (role === "owner" || role === "admin") setShowOwnerPortal(true);
       setStatus("Ready.");
     } catch (err) { setStatus(err.message || "Auth failed."); }
   };
@@ -488,10 +479,12 @@ export default function App() {
   const handleLogout = () => {
     setToken(""); setSessionId(null); setMessages([welcomeMsg]);
     setCartData(null); setShowCartPanel(false); localStorage.removeItem("token");
-    setActiveCategories([]); setActiveCategoryName(null);
-    setUserRole("customer"); localStorage.removeItem("userRole");
-    setShowOwnerPortal(false);
+    setActiveCategories([]); setActiveCategoryName(null); setCurrentItems([]);
+    setUserRole("customer"); localStorage.removeItem("userRole"); setShowOwnerPortal(false);
+    setSelectedRestaurant(null); setTab("home");
   };
+
+  // ===================== HELPERS =====================
 
   const renderContent = (text) => {
     return text.split(/(\*\*[^*]+\*\*)/g).map((p, i) =>
@@ -499,474 +492,538 @@ export default function App() {
     );
   };
 
+  const cartItemCount = cartData?.restaurants?.reduce((t, g) => t + g.items.reduce((s, i) => s + i.quantity, 0), 0) || 0;
+  const cartTotal = cartData?.grand_total_cents ? (cartData.grand_total_cents / 100).toFixed(2) : "0.00";
+
+  const activeOrders = myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000));
+  const completedOrders = myOrders.filter(o => ['completed'].includes(o.status) && (Date.now() - new Date(o.created_at).getTime() >= 3600000));
+
+  // ===================== OWNER PORTAL =====================
+
   if (showOwnerPortal) {
     return (
       <OwnerPortal
         token={token}
-        onBack={() => {
-          if (userRole === "owner") {
-            handleLogout();
-          } else {
-            setShowOwnerPortal(false);
-          }
-        }}
-        onTokenUpdate={(t) => {
-          setToken(t);
-          setUserRole("owner");
-          localStorage.setItem("userRole", "owner");
-          setShowOwnerPortal(true);
-        }}
+        onBack={() => { if (userRole === "owner") handleLogout(); else setShowOwnerPortal(false); }}
+        onTokenUpdate={(t) => { setToken(t); setUserRole("owner"); localStorage.setItem("userRole", "owner"); setShowOwnerPortal(true); }}
       />
     );
   }
 
+  // ===================== RENDER =====================
+
   return (
-    <div className="page">
-      {/* Location Bar */}
-      <div className="location-bar">
-        <div className="location-left">
-          <span className="location-icon">📍</span>
-          <input
-            className="zip-input"
-            type="text"
-            placeholder="Zip"
-            value={zipcode}
-            onChange={(e) => handleZipcodeChange(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") lookupZipcode(zipcode); }}
-            maxLength={5}
-          />
-          <div className="city-search-wrapper">
-            <input
-              className="city-input"
-              type="text"
-              placeholder="Search city..."
-              value={citySearch}
-              onChange={(e) => handleCitySearchChange(e.target.value)}
-              onFocus={() => { if (citySuggestions.length > 0) setShowCitySuggestions(true); }}
-              onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
-            />
-            {showCitySuggestions && citySuggestions.length > 0 && (
-              <div className="city-suggestions">
-                {citySuggestions.map((s, i) => (
-                  <div key={i} className="city-suggestion-item" onMouseDown={() => selectCity(s)}>
-                    <span className="city-suggestion-name">{s.city}, {s.state}</span>
-                    {s.zipcode && <span className="city-suggestion-zip">{s.zipcode}</span>}
-                  </div>
-                ))}
+    <div className="app-shell">
+      <div className="app-content">
+        {/* ====== HOME TAB ====== */}
+        {tab === "home" && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>
+            {/* Location Bar */}
+            <div className="location-bar">
+              <span className="loc-icon">📍</span>
+              <div className="loc-info">
+                <span className="loc-label">{locating ? "Detecting..." : locationLabel || "Set location"}</span>
+                {zipcode && <span className="loc-sub">ZIP: {zipcode}</span>}
               </div>
-            )}
-          </div>
-          <button className="location-btn gps-btn" onClick={useMyLocation} disabled={locating} title="Use my location">
-            🎯
-          </button>
-        </div>
-        <div className="location-center">
-          {locating && <span className="location-label">⏳ Looking up...</span>}
-          {!locating && locationLabel && <span className="location-label">{locationLabel}</span>}
-        </div>
-        <div className="location-right">
-          <label className="radius-label">
-            Within
-            <select value={radius} onChange={(e) => handleRadiusChange(Number(e.target.value))}>
-              {RADIUS_OPTIONS.map((r) => (
-                <option key={r} value={r}>{r} mi</option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </div>
-
-      <header className="hero">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, ease: "easeOut" }}
-        >
-          <p className="badge">One chat for every restaurant</p>
-          <h1>RestarentAI</h1>
-          <p className="subtitle">
-            A fast, single-chat ordering platform for nearby restaurants.
-            No endless apps, no extra fees.
-          </p>
-        </motion.div>
-        <div className="hero-card">
-          {/* Partnered restaurants */}
-          {restaurants.length > 0 && (
-            <>
-              <h2>🟢 Order Now</h2>
-              <ul>
-                {restaurants.map((r, idx) => (
-                  <motion.li
-                    key={r.id}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: idx * 0.1, duration: 0.4 }}
-                    whileHover={{ scale: 1.02, x: 6 }}
-                    onClick={() => token && selectRestaurant(r)}
-                    style={{ cursor: token ? "pointer" : "default" }}
-                  >
-                    <div className="restaurant-info">
-                      <strong>{r.name}</strong>
-                      {r.city && <span className="restaurant-city">{r.city}</span>}
-                    </div>
-                    <div className="restaurant-meta">
-                      {r.distance_miles != null && (
-                        <span className="restaurant-distance">{r.distance_miles} mi</span>
-                      )}
-                      <span className="restaurant-slug">#{r.slug}</span>
-                    </div>
-                  </motion.li>
-                ))}
-              </ul>
-            </>
-          )}
-
-          {/* Real nearby restaurants */}
-          <h2 style={restaurants.length > 0 ? { marginTop: 20 } : {}}>📍 Nearby Restaurants</h2>
-          {nearbyPlaces.length === 0 ? (
-            <p className="hint">
-              {locating ? "Discovering nearby restaurants..." : userLat ? "No restaurants found nearby." : "Set your location to discover restaurants."}
-            </p>
-          ) : (
-            <ul>
-              {nearbyPlaces.map((p, i) => (
-                <motion.li
-                  key={`nearby-${i}`}
-                  className="nearby-item"
-                  initial={{ opacity: 0, x: -20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.08, duration: 0.35 }}
-                  whileHover={{ scale: 1.02, x: 6 }}
-                >
-                  <div className="restaurant-info">
-                    <strong>{p.name}</strong>
-                    <span className="restaurant-city">
-                      {p.cuisine && <span className="cuisine-tag">{p.cuisine}</span>}
-                      {p.address && ` · ${p.address}`}
-                    </span>
-                  </div>
-                  <div className="restaurant-meta">
-                    <span className="restaurant-distance">{p.distance_miles} mi</span>
-                  </div>
-                </motion.li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </header>
-
-      <main className="content">
-        {!token ? (
-          <motion.section
-            className="auth"
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.5, ease: "easeOut" }}
-          >
-            <h2>{mode === "login" ? "👋 Welcome back" : "🚀 Get started"}</h2>
-            <form onSubmit={handleAuth}>
-              <label>Email<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" /></label>
-              <label>Password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} placeholder="••••••••" /></label>
-              <motion.button
-                type="submit"
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.97 }}
-              >{mode === "login" ? "Sign in" : "Create account"}</motion.button>
-            </form>
-            <button className="ghost" onClick={() => setMode(mode === "login" ? "register" : "login")}>
-              {mode === "login" ? "Need an account?" : "Already have an account?"}
-            </button>
-            {status !== "Ready." && <p className="status-msg">{status}</p>}
-          </motion.section>
-        ) : (
-          <section className="chat">
-            <div className="chat-header">
-              <div>
-                <h2>Ordering chat</h2>
-                <p className="chat-status">{status}</p>
-              </div>
-              <div className="chat-header-right">
-                {cartData && cartData.restaurants && cartData.restaurants.length > 0 && (
-                  <div style={{ position: "relative" }}>
-                    <button className="cart-btn" onClick={() => setShowCartPanel((v) => !v)}>
-                      🛒 ${(cartData.grand_total_cents / 100).toFixed(2)}
-                      {cartData.restaurants.length > 1 && (
-                        <span style={{
-                          background: "#ef4444", borderRadius: "50%", fontSize: "0.65rem",
-                          padding: "1px 5px", marginLeft: 4, fontWeight: 700, color: "#fff",
-                        }}>{cartData.restaurants.length}</span>
-                      )}
-                    </button>
-                    {showCartPanel && (
-                      <div className="cart-panel">
-                        <div className="cart-panel-header">
-                          <span>🛒 Your Cart</span>
-                          <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
-                        </div>
-                        <div className="cart-panel-body">
-                          {cartData.restaurants.map((group) => (
-                            <div key={group.restaurant_id} className="cart-restaurant-group">
-                              <div className="cart-restaurant-name">🍽️ {group.restaurant_name}</div>
-                              {group.items.map((item, i) => (
-                                <div key={i} className="cart-item-row">
-                                  <span>{item.quantity}x {item.name}</span>
-                                  <span>${(item.line_total_cents / 100).toFixed(2)}</span>
-                                </div>
-                              ))}
-                              <div className="cart-subtotal">
-                                Subtotal: ${(group.subtotal_cents / 100).toFixed(2)}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="cart-panel-footer">
-                          <div className="cart-grand-total">
-                            Grand Total: ${(cartData.grand_total_cents / 100).toFixed(2)}
-                          </div>
-                          <button
-                            className="cart-checkout-btn"
-                            disabled={checkingOut}
-                            onClick={async () => {
-                              setCheckingOut(true);
-                              try {
-                                const result = await checkout(token);
-                                setCheckoutDone(result);
-                                setCartData(null);
-                                setShowCartPanel(false);
-                                // Refresh orders with small delay to ensure DB commit, then auto-open
-                                setTimeout(() => {
-                                  fetchMyOrders(token).then((orders) => {
-                                    setMyOrders(orders);
-                                    setShowOrderTracker(true); // Auto-open to show new order
-                                  }).catch(() => { });
-                                }, 500);
-                                // Refresh again at 2s and 5s for robustness
-                                setTimeout(() => {
-                                  fetchMyOrders(token).then(setMyOrders).catch(() => { });
-                                }, 2000);
-                                setTimeout(async () => {
-                                  try {
-                                    const c = await fetchCart(token);
-                                    setCartData(c);
-                                  } catch { }
-                                  fetchMyOrders(token).then(setMyOrders).catch(() => { });
-                                  setCheckoutDone(null);
-                                }, 5000);
-                              } catch (err) {
-                                alert(err.message || "Checkout failed");
-                              }
-                              setCheckingOut(false);
-                            }}
-                          >
-                            {checkingOut ? "⏳ Placing Order..." : "🛒 Place Order"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {myOrders.length > 0 && (
-                  <div style={{ position: "relative" }}>
-                    <button className="orders-header-btn" onClick={() => setShowOrderTracker(!showOrderTracker)}>
-                      📦 Orders ({myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).length})
-                    </button>
-                    {showOrderTracker && (
-                      <div className="orders-dropdown">
-                        <div className="orders-dropdown-header">
-                          <span>📦 My Orders</span>
-                          <button className="cart-panel-close" onClick={() => setShowOrderTracker(false)}>✕</button>
-                        </div>
-                        <div className="orders-dropdown-body">
-                          {myOrders.filter(o => !['completed', 'rejected'].includes(o.status) || (Date.now() - new Date(o.created_at).getTime() < 3600000)).slice(0, 5).map(order => {
-                            const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
-                            const isRejected = order.status === 'rejected';
-                            const currentStep = isRejected ? -1 : steps.indexOf(order.status);
-                            return (
-                              <div key={order.id} className={`order-tracker-card ${isRejected ? 'rejected' : ''}`}>
-                                <div className="order-tracker-restaurant">
-                                  <span>🍽️ {order.restaurant_name}</span>
-                                  <span className="order-tracker-total">${(order.total_cents / 100).toFixed(2)}</span>
-                                </div>
-                                <div className="order-tracker-items-summary">
-                                  {order.items.map((it, i) => `${it.quantity}x ${it.name}`).join(', ')}
-                                </div>
-                                {isRejected ? (
-                                  <div className="order-tracker-rejected">❌ Order Rejected</div>
-                                ) : (
-                                  <div className="order-tracker-steps">
-                                    {steps.map((s, i) => (
-                                      <div key={s} className={`order-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
-                                        <div className="order-step-dot" />
-                                        <span className="order-step-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                <button className="ghost" onClick={handleLogout}>Log out</button>
+              <div className="loc-actions">
+                <input className="loc-zip-input" type="text" placeholder="Zip" value={zipcode}
+                  onChange={(e) => handleZipcodeChange(e.target.value)} maxLength={5} />
+                <button className="loc-gps-btn" onClick={useMyLocation} disabled={locating} title="Use GPS">🎯</button>
+                <select className="loc-radius-select" value={radius} onChange={(e) => handleRadiusChange(Number(e.target.value))}>
+                  {RADIUS_OPTIONS.map((r) => <option key={r} value={r}>{r} mi</option>)}
+                </select>
               </div>
             </div>
 
-            <div className="chat-body-row">
-              <div className="chat-window">
-                {messages.map((msg, idx) => (
-                  <div key={idx}>
-                    {msg.role === "user" && msg.content.startsWith("add:") ? null : (
-                      <motion.div
-                        className={`bubble ${msg.role}`}
-                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        transition={{ duration: 0.3 }}
-                      >{renderContent(msg.content)}</motion.div>
-                    )}
-                    {msg.categories && (
-                      <motion.div
-                        className="chips-row"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        transition={{ duration: 0.4, delay: 0.1 }}
-                      >
-                        {msg.categories.map((cat, ci) => (
-                          <motion.button
-                            key={cat.id}
-                            className="chip"
-                            onClick={() => handleCategoryClick(cat)}
-                            initial={{ opacity: 0, scale: 0.8 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            transition={{ delay: ci * 0.06, duration: 0.3 }}
-                            whileHover={{ scale: 1.08 }}
-                            whileTap={{ scale: 0.95 }}
-                          >
-                            <span className="chip-emoji">{getFoodEmoji(cat.name)}</span>
-                            <span className="chip-name">{cat.name}</span>
-                            <span className="chip-count">{cat.item_count}</span>
-                          </motion.button>
-                        ))}
-                      </motion.div>
-                    )}
-                    {msg.items && (
-                      <div className="items-grid">
-                        {msg.items.map((item, ii) => (
-                          <motion.div
-                            key={item.id}
-                            className="item-card"
-                            initial={{ opacity: 0, x: -15 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            transition={{ delay: ii * 0.05, duration: 0.3 }}
-                            whileHover={{ scale: 1.02 }}
-                          >
-                            <span className="item-emoji">{getFoodEmoji(item.name)}</span>
-                            <div className="item-info">
-                              <span className="item-name">{item.name}</span>
-                              {item.description && <span className="item-desc">{item.description}</span>}
-                              <span className="item-price">${(item.price_cents / 100).toFixed(2)}</span>
-                            </div>
-                            <motion.button
-                              className="add-btn"
-                              onClick={() => handleAddItem(item)}
-                              whileHover={{ scale: 1.2 }}
-                              whileTap={{ scale: 0.9 }}
-                            >+</motion.button>
-                          </motion.div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                <div ref={chatEndRef} />
-              </div>
-
-              {/* Sticky Category Sidebar */}
-              <AnimatePresence>
-                {activeCategories.length > 0 && (
-                  <motion.div
-                    className="category-sidebar"
-                    initial={{ opacity: 0, x: 40 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 40 }}
-                    transition={{ duration: 0.3 }}
-                  >
-                    <div className="category-sidebar-header">
-                      <span>📂 Categories</span>
-                      <button className="category-sidebar-close" onClick={() => setActiveCategories([])}>✕</button>
+            {/* Search */}
+            <div className="search-bar">
+              <span className="search-icon">🔍</span>
+              <input placeholder="Search restaurants or cuisines..."
+                value={citySearch} onChange={(e) => handleCitySearchChange(e.target.value)}
+                onFocus={() => { if (citySuggestions.length > 0) setShowCitySuggestions(true); }}
+                onBlur={() => setTimeout(() => setShowCitySuggestions(false), 200)}
+              />
+              {showCitySuggestions && citySuggestions.length > 0 && (
+                <div className="city-suggestions">
+                  {citySuggestions.map((s, i) => (
+                    <div key={i} className="city-suggestion-item" onMouseDown={() => selectCity(s)}>
+                      <span>{s.city}, {s.state}</span>
+                      {s.zipcode && <span className="city-suggestion-zip">{s.zipcode}</span>}
                     </div>
-                    <div className="category-sidebar-list">
-                      {activeCategories.map((cat) => (
-                        <motion.button
-                          key={cat.id}
-                          className={`category-sidebar-item ${activeCategoryName === cat.name ? 'active' : ''}`}
-                          onClick={() => handleCategoryClick(cat)}
-                          whileHover={{ scale: 1.03, x: 3 }}
-                          whileTap={{ scale: 0.97 }}
-                        >
-                          <span className="category-sidebar-emoji">{getFoodEmoji(cat.name)}</span>
-                          <span className="category-sidebar-name">{cat.name}</span>
-                          <span className="category-sidebar-count">{cat.item_count}</span>
-                        </motion.button>
-                      ))}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            <div className="chat-input-wrapper">
-              {isListening && (
-                <div className="voice-indicator">
-                  <div className="voice-wave"><span></span><span></span><span></span><span></span><span></span></div>
-                  <span>Listening... speak a restaurant name, item, or order</span>
+                  ))}
                 </div>
               )}
-              <form className="chat-input" onSubmit={handleSend}>
-                <div className="input-container">
-                  <input ref={inputRef} value={messageText} onChange={handleInputChange}
-                    onKeyDown={handleKeyDown} placeholder={isListening ? 'Listening...' : 'Type # for restaurants, or say what you want...'} />
-                  {showSuggestions && (
-                    <div className="suggestions">
-                      {filteredRestaurants.map((r, i) => (
-                        <div key={r.slug + "-" + i}
-                          className={`suggestion-item ${i === selectedIndex ? "selected" : ""}`}
-                          onMouseDown={(e) => { e.preventDefault(); selectRestaurant(r); }}
-                          onMouseEnter={() => setSelectedIndex(i)}
-                        >
-                          <div>
-                            <span className="suggestion-name">{r.name}</span>
-                            {r.distance_miles != null && (
-                              <span className="suggestion-distance"> · {r.distance_miles} mi</span>
-                            )}
-                            {r.cuisine && (
-                              <span className="cuisine-tag" style={{ marginLeft: 6 }}>{r.cuisine}</span>
-                            )}
+            </div>
+
+            {/* Featured Restaurant */}
+            {restaurants.length > 0 && (
+              <motion.div className="featured-card" onClick={() => {
+                if (!token) { setTab("profile"); return; }
+                selectRestaurant(restaurants[0]);
+              }}
+                whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }} style={{ cursor: 'pointer' }}>
+                {(() => {
+                  const heroImg = getRestaurantImage(restaurants[0].name);
+                  return heroImg ? (
+                    <img src={heroImg} alt={restaurants[0].name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    <div style={{ width: '100%', height: '100%', background: `linear-gradient(135deg, ${CARD_GRADIENTS[0][0]}, ${CARD_GRADIENTS[0][1]})`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '4rem' }}>
+                      {getFoodEmoji(restaurants[0].name)}
+                    </div>
+                  );
+                })()}
+                <div className="featured-overlay">
+                  <span className="featured-badge">PARTNERED</span>
+                  <div className="featured-name">{restaurants[0].name}</div>
+                  <div className="featured-sub">
+                    {restaurants[0].city && `${restaurants[0].city} · `}
+                    {restaurants[0].distance_miles != null && `${restaurants[0].distance_miles} mi away`}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* All Restaurants Grid */}
+            {restaurants.length > 0 && (
+              <>
+                <div className="section-header">
+                  <span className="section-title">🟢 Order Now ({restaurants.length})</span>
+                </div>
+                <div className="restaurant-grid">
+                  {restaurants.map((r, idx) => {
+                    const grad = CARD_GRADIENTS[idx % CARD_GRADIENTS.length];
+                    const rImg = getRestaurantImage(r.name);
+                    return (
+                      <motion.div key={r.id} className="restaurant-card-v"
+                        onClick={() => {
+                          if (!token) { setTab("profile"); return; }
+                          selectRestaurant(r);
+                        }}
+                        initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: idx * 0.04 }}>
+                        <div className="restaurant-card-v-img" style={rImg ? {} : { background: `linear-gradient(135deg, ${grad[0]}, ${grad[1]})` }}>
+                          {rImg ? (
+                            <img src={rImg} alt={r.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
+                          ) : (
+                            <span className="restaurant-card-v-emoji">{getFoodEmoji(r.name)}</span>
+                          )}
+                        </div>
+                        <div className="restaurant-card-v-body">
+                          <div className="restaurant-card-v-name">{r.name}</div>
+                          <div className="restaurant-card-v-meta">
+                            {r.distance_miles != null && <span>{r.distance_miles} mi</span>}
+                            {r.city && <span>· {r.city}</span>}
                           </div>
-                          <div>
-                            {r.partnered ? (
-                              <span className="partner-badge">🟢 Order Now</span>
-                            ) : (
-                              <span className="suggestion-slug">#{r.slug}</span>
-                            )}
+                          <span className="order-chip">{token ? 'Order' : 'Sign in'}</span>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* Nearby */}
+            {(nearbyPlaces.length > 0 || (!locating && userLat)) && (
+              <>
+                <div className="section-header" style={{ marginTop: 16 }}>
+                  <span className="section-title">📍 Nearby Restaurants</span>
+                </div>
+                <div className="nearby-list">
+                  {nearbyPlaces.length > 0 ? (
+                    nearbyPlaces.slice(0, 8).map((p, i) => (
+                      <motion.div key={`nearby-${i}`} className="nearby-item"
+                        initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: i * 0.05 }}>
+                        <div className="nearby-item-img" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.5rem' }}>
+                          {getFoodEmoji(p.name, p.cuisine || "")}
+                        </div>
+                        <div className="nearby-item-info">
+                          <div className="nearby-item-name">{p.name}</div>
+                          <div className="nearby-item-meta">
+                            {p.cuisine && <span className="cuisine-tag">{p.cuisine}</span>}
+                            {p.address && ` · ${p.address}`}
                           </div>
                         </div>
-                      ))}
+                        <span className="nearby-item-distance">{p.distance_miles} mi</span>
+                      </motion.div>
+                    ))
+                  ) : (
+                    <div className="menu-empty">
+                      <div className="menu-empty-emoji">⏳</div>
+                      <div className="menu-empty-text">Searching nearby restaurants...</div>
                     </div>
                   )}
                 </div>
-                <button type="button" className={`mic-btn ${isListening ? "listening" : ""}`}
-                  onClick={startListening} title="Voice input — say a restaurant name or what you want to order">
-                  {isListening ? "🔴" : "🎤"}
-                </button>
-                <button type="submit">Send</button>
-              </form>
-            </div>
-          </section>
+              </>
+            )}
+          </motion.div>
         )}
-      </main>
+
+        {/* ====== CHAT + MENU TAB ====== */}
+        {tab === "chat" && (
+          <div className="chat-page">
+            {!token ? (
+              <div className="menu-empty" style={{ paddingTop: 60 }}>
+                <div className="menu-empty-emoji">🔐</div>
+                <div className="menu-empty-text">Sign in to start ordering</div>
+                <div className="menu-empty-hint">Go to the Profile tab to log in</div>
+              </div>
+            ) : (
+              <>
+                {/* Chat Header */}
+                <div className="chat-header">
+                  <div className="chat-header-left">
+                    {selectedRestaurant && (
+                      <button className="chat-header-back" onClick={() => { setSelectedRestaurant(null); setActiveCategories([]); setCurrentItems([]); setTab("home"); }}>←</button>
+                    )}
+                    <div>
+                      <div className="chat-header-title">{selectedRestaurant?.name || "RestaurantAI"}</div>
+                      <div className="chat-header-status">{selectedRestaurant ? "● Online" : status}</div>
+                    </div>
+                  </div>
+                  {cartData && cartData.restaurants && cartData.restaurants.length > 0 && (
+                    <button className="chat-cart-btn" onClick={() => setShowCartPanel((v) => !v)}>
+                      🛒 ${cartTotal}
+                      {cartItemCount > 1 && <span className="cart-count">{cartItemCount}</span>}
+                    </button>
+                  )}
+                </div>
+
+                {/* Category Pills */}
+                {activeCategories.length > 0 && (
+                  <div className="category-pills">
+                    {activeCategories.map((cat) => {
+                      const catImg = getFoodItemImage(cat.name);
+                      return (
+                        <button key={cat.id}
+                          className={`cat-pill ${activeCategoryName === cat.name ? "active" : ""}`}
+                          onClick={() => handleCategoryClick(cat)}>
+                          {catImg ? (
+                            <img src={catImg} alt="" className="cat-thumb" />
+                          ) : (
+                            <span className="cat-emoji">{getFoodEmoji(cat.name)}</span>
+                          )}
+                          {cat.name}
+                          <span className="cat-count">{cat.item_count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Menu Items */}
+                <div className="menu-area">
+                  {currentItems.length > 0 ? (
+                    currentItems.map((item, ii) => (
+                      <motion.div key={item.id} className="menu-item"
+                        initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: ii * 0.04 }}>
+                        <div className="menu-item-img">
+                          {(() => {
+                            const itemImg = getFoodItemImage(item.name, activeCategoryName || '');
+                            return itemImg ? (
+                              <img src={itemImg} alt={item.name} style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
+                            ) : getFoodEmoji(item.name);
+                          })()}
+                        </div>
+                        <div className="menu-item-info">
+                          <div className="menu-item-name">{item.name}</div>
+                          {item.description && <div className="menu-item-desc">{item.description}</div>}
+                          <div className="menu-item-price">${(item.price_cents / 100).toFixed(2)}</div>
+                        </div>
+                        <motion.button
+                          className={`menu-add-btn ${addedItemId === item.id ? 'added' : ''}`}
+                          onClick={() => handleAddItem(item)}
+                          whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.85 }}>
+                          +
+                        </motion.button>
+                      </motion.div>
+                    ))
+                  ) : activeCategories.length > 0 ? (
+                    <div className="menu-empty">
+                      <div className="menu-empty-emoji">👆</div>
+                      <div className="menu-empty-text">Tap a category above to see items</div>
+                    </div>
+                  ) : selectedRestaurant ? (
+                    <div className="menu-empty">
+                      <div className="menu-empty-emoji">⏳</div>
+                      <div className="menu-empty-text">Loading menu...</div>
+                    </div>
+                  ) : (
+                    <div className="menu-empty">
+                      <div className="menu-empty-emoji">🍽️</div>
+                      <div className="menu-empty-text">Pick a restaurant from the Home tab</div>
+                      <div className="menu-empty-hint">Or type # to search restaurants below</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* AI Chat Strip */}
+                <div className="ai-strip">
+                  {/* Show latest bot message */}
+                  {messages.length > 0 && (() => {
+                    const lastBot = [...messages].reverse().find(m => m.role === "bot");
+                    return lastBot ? (
+                      <div className="ai-message">
+                        <div className="ai-avatar">✨</div>
+                        <div className="ai-bubble">{renderContent(lastBot.content)}</div>
+                      </div>
+                    ) : null;
+                  })()}
+
+                  {/* Voice indicator */}
+                  {isListening && (
+                    <div className="voice-indicator">
+                      <div className="voice-wave"><span></span><span></span><span></span><span></span><span></span></div>
+                      <span>Listening...</span>
+                    </div>
+                  )}
+
+                  {/* Input */}
+                  <form onSubmit={handleSend} className="ai-chat-input-row" style={{ position: 'relative' }}>
+                    <input ref={inputRef} className="ai-chat-input" value={messageText}
+                      onChange={handleInputChange} onKeyDown={handleKeyDown}
+                      placeholder={isListening ? "Listening..." : "Type # for restaurants, or ask anything..."} />
+                    <button type="button" className={`mic-btn ${isListening ? "listening" : ""}`} onClick={startListening}>
+                      {isListening ? "🔴" : "🎤"}
+                    </button>
+                    <button type="submit" className="send-btn">➤</button>
+                    {/* Restaurant suggestions */}
+                    {showSuggestions && (
+                      <div className="suggestions">
+                        {filteredRestaurants.map((r, i) => (
+                          <div key={r.slug + "-" + i}
+                            className={`suggestion-item ${i === selectedIndex ? "selected" : ""}`}
+                            onMouseDown={(e) => { e.preventDefault(); selectRestaurant(r); }}
+                            onMouseEnter={() => setSelectedIndex(i)}>
+                            <div>
+                              <span className="suggestion-name">{r.name}</span>
+                              {r.distance_miles != null && <span className="suggestion-distance"> · {r.distance_miles} mi</span>}
+                              {r.cuisine && <span className="cuisine-tag" style={{ marginLeft: 6 }}>{r.cuisine}</span>}
+                            </div>
+                            <div>
+                              {r.partnered ? <span className="partner-badge">🟢 Order</span> : <span className="suggestion-slug">#{r.slug}</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </form>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ====== ORDERS TAB ====== */}
+        {tab === "orders" && (
+          <motion.div className="orders-page" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <div className="orders-title">Your Orders</div>
+
+            {!token ? (
+              <div className="orders-empty">
+                <div className="orders-empty-emoji">🔐</div>
+                <div className="menu-empty-text">Sign in to see your orders</div>
+              </div>
+            ) : (
+              <>
+                <div className="orders-tabs">
+                  <button className={`orders-tab ${ordersTab === "current" ? "active" : ""}`} onClick={() => setOrdersTab("current")}>Current</button>
+                  <button className={`orders-tab ${ordersTab === "history" ? "active" : ""}`} onClick={() => setOrdersTab("history")}>History</button>
+                </div>
+
+                {ordersTab === "current" && (
+                  <>
+                    {activeOrders.length === 0 ? (
+                      <div className="orders-empty">
+                        <div className="orders-empty-emoji">📦</div>
+                        <div className="menu-empty-text">No active orders</div>
+                        <div className="menu-empty-hint">Go to Home tab and pick a restaurant to start ordering!</div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="orders-section-title">In Progress</div>
+                        {activeOrders.map((order) => {
+                          const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
+                          const isRejected = order.status === 'rejected';
+                          const currentStep = isRejected ? -1 : steps.indexOf(order.status);
+                          return (
+                            <motion.div key={order.id} className={`order-card ${isRejected ? 'rejected' : ''}`}
+                              initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+                              <div className="order-card-header">
+                                <div>
+                                  <div className="order-restaurant-name">🍽️ {order.restaurant_name}</div>
+                                  <div className="order-time">{new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                </div>
+                                <div className="order-price">${(order.total_cents / 100).toFixed(2)}</div>
+                              </div>
+                              <div className="order-items-summary">
+                                {order.items.map((it) => `${it.quantity}x ${it.name}`).join(', ')}
+                              </div>
+                              {isRejected ? (
+                                <div className="order-rejected-badge">❌ Order Rejected</div>
+                              ) : (
+                                <div className="progress-tracker">
+                                  {steps.map((s, i) => (
+                                    <div key={s} className={`progress-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
+                                      <div className="progress-dot" />
+                                      <span className="progress-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </motion.div>
+                          );
+                        })}
+                      </>
+                    )}
+                  </>
+                )}
+
+                {ordersTab === "history" && (
+                  <>
+                    {completedOrders.length === 0 ? (
+                      <div className="orders-empty">
+                        <div className="orders-empty-emoji">📋</div>
+                        <div className="menu-empty-text">No past orders yet</div>
+                      </div>
+                    ) : (
+                      completedOrders.map((order) => (
+                        <div key={order.id} className="recent-order">
+                          <div className="recent-order-info">
+                            <div className="recent-order-name">🍽️ {order.restaurant_name}</div>
+                            <div className="recent-order-detail">
+                              {order.items.map((it) => `${it.quantity}x ${it.name}`).join(', ')} · ${(order.total_cents / 100).toFixed(2)}
+                            </div>
+                          </div>
+                          <span className="delivered-badge">Delivered</span>
+                        </div>
+                      ))
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </motion.div>
+        )}
+
+        {/* ====== PROFILE TAB ====== */}
+        {tab === "profile" && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            {!token ? (
+              <div className="auth-page">
+                <div className="auth-logo">RestaurantAI</div>
+                <div className="auth-subtitle">{mode === "login" ? "Welcome back" : "Create your account"}</div>
+                <form className="auth-form" onSubmit={handleAuth}>
+                  <label>Email
+                    <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" />
+                  </label>
+                  <label>Password
+                    <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} placeholder="••••••••" />
+                  </label>
+                  <motion.button className="auth-submit" type="submit" whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}>
+                    {mode === "login" ? "Sign in" : "Create account"}
+                  </motion.button>
+                </form>
+                <button className="auth-switch" onClick={() => setMode(mode === "login" ? "register" : "login")}>
+                  {mode === "login" ? "Need an account? Sign up" : "Already have an account? Sign in"}
+                </button>
+                {status !== "Ready." && <p className="auth-status">{status}</p>}
+              </div>
+            ) : (
+              <div className="profile-page">
+                <div className="profile-header">
+                  <div className="profile-avatar">👤</div>
+                  <div>
+                    <div className="profile-name">{email.split("@")[0]}</div>
+                    <div className="profile-email">{email}</div>
+                  </div>
+                </div>
+                <div className="profile-actions">
+                  {(userRole === "owner" || userRole === "admin") && (
+                    <button className="profile-action-btn" onClick={() => setShowOwnerPortal(true)}>
+                      <span className="action-icon">🏪</span> Owner Dashboard
+                    </button>
+                  )}
+                  <button className="profile-action-btn danger" onClick={handleLogout}>
+                    <span className="action-icon">🚪</span> Log out
+                  </button>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        )}
+      </div>
+
+      {/* Cart Panel */}
+      <AnimatePresence>
+        {showCartPanel && cartData && cartData.restaurants && (
+          <motion.div className="cart-panel" initial={{ y: 300 }} animate={{ y: 0 }} exit={{ y: 300 }} transition={{ type: "spring", damping: 25 }}>
+            <div className="cart-panel-header">
+              <span>🛒 Your Cart</span>
+              <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
+            </div>
+            <div className="cart-panel-body">
+              {cartData.restaurants.map((group) => (
+                <div key={group.restaurant_id} className="cart-restaurant-group">
+                  <div className="cart-restaurant-name">🍽️ {group.restaurant_name}</div>
+                  {group.items.map((item, i) => (
+                    <div key={i} className="cart-item-row">
+                      <span>{item.quantity}x {item.name}</span>
+                      <span>${(item.line_total_cents / 100).toFixed(2)}</span>
+                    </div>
+                  ))}
+                  <div className="cart-subtotal">Subtotal: ${(group.subtotal_cents / 100).toFixed(2)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="cart-panel-footer">
+              <div className="cart-grand-total">Grand Total: ${cartTotal}</div>
+              <button className="cart-checkout-btn" disabled={checkingOut}
+                onClick={async () => {
+                  setCheckingOut(true);
+                  try {
+                    await checkout(token);
+                    setCartData(null); setShowCartPanel(false);
+                    setTab("orders"); setOrdersTab("current");
+                    setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 500);
+                    setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 2000);
+                    setTimeout(async () => {
+                      try { const c = await fetchCart(token); setCartData(c); } catch { }
+                      fetchMyOrders(token).then(setMyOrders).catch(() => { });
+                    }, 5000);
+                  } catch (err) { alert(err.message || "Checkout failed"); }
+                  setCheckingOut(false);
+                }}>
+                {checkingOut ? "⏳ Placing Order..." : "🛒 Place Order"}
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Bottom Nav */}
+      <nav className="bottom-nav">
+        <button className={`nav-item ${tab === "home" ? "active" : ""}`} onClick={() => setTab("home")}>
+          <span className="nav-icon">🏠</span>
+          <span>Home</span>
+        </button>
+        <button className={`nav-item ${tab === "chat" ? "active" : ""}`} onClick={() => setTab("chat")}>
+          <span className="nav-icon">💬</span>
+          <span>Chat</span>
+          {selectedRestaurant && <span className="nav-badge">●</span>}
+        </button>
+        <button className={`nav-item ${tab === "orders" ? "active" : ""}`} onClick={() => setTab("orders")}>
+          <span className="nav-icon">📦</span>
+          <span>Orders</span>
+          {activeOrders.length > 0 && <span className="nav-badge">{activeOrders.length}</span>}
+        </button>
+        <button className={`nav-item ${tab === "profile" ? "active" : ""}`} onClick={() => setTab("profile")}>
+          <span className="nav-icon">👤</span>
+          <span>Profile</span>
+        </button>
+      </nav>
     </div>
   );
 }
