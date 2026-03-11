@@ -383,11 +383,11 @@ export default function App() {
   // Tiny silent WAV to 'warm up' audio element on user gesture (iOS requirement)
   const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
 
-  // Speak text — Sarvam AI Bulbul v3 TTS with browser SpeechSynthesis fallback
+  // Speak text — Browser SpeechSynthesis (synchronous, works on all mobile devices)
+  // NOTE: Sarvam AI TTS code removed from voiceSpeak — it caused async context issues
+  // that broke audio playback on mobile. Sarvam AI is still used for STT + LLM matching.
   const voiceSpeak = (text, autoListenAfter = true) => {
     if (!text) return;
-    // Stop any playing audio
-    if (ttsAudioElRef.current) { ttsAudioElRef.current.pause(); ttsAudioElRef.current.currentTime = 0; }
     window.speechSynthesis?.cancel();
     setVoiceState("speaking");
 
@@ -399,47 +399,17 @@ export default function App() {
       }
     };
 
-    // Browser voice fallback
-    const useBrowserVoice = () => {
-      if (window.speechSynthesis) {
-        const u = new SpeechSynthesisUtterance(text);
-        u.rate = 1.05; u.pitch = 1.0; u.lang = "en-US";
-        u.onend = afterSpeak; u.onerror = afterSpeak;
-        window.speechSynthesis.speak(u);
-      } else { afterSpeak(); }
-    };
-
-    // Try Sarvam AI TTS first, fall back to browser voice
-    let done = false;
-    const safeDone = () => { if (!done) { done = true; afterSpeak(); } };
-    // Safety: if everything takes >10s, use browser voice
-    const timer = setTimeout(() => { if (!done) { done = true; useBrowserVoice(); } }, 10000);
-
-    (async () => {
-      try {
-        const result = await voiceTTS(text, "en-IN", "kavya");
-        if (done) return;
-        if (result && result.audio_base64) {
-          clearTimeout(timer);
-          const bin = atob(result.audio_base64);
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          const blob = new Blob([arr], { type: "audio/wav" });
-          const url = URL.createObjectURL(blob);
-          const el = ttsAudioElRef.current;
-          if (el) {
-            el.onended = () => { URL.revokeObjectURL(url); safeDone(); };
-            el.onerror = () => { URL.revokeObjectURL(url); useBrowserVoice(); };
-            el.src = url;
-            try { await el.play(); } catch { URL.revokeObjectURL(url); useBrowserVoice(); }
-          } else { URL.revokeObjectURL(url); useBrowserVoice(); }
-        } else { clearTimeout(timer); useBrowserVoice(); }
-      } catch (err) {
-        console.warn("Sarvam TTS error:", err);
-        clearTimeout(timer);
-        if (!done) useBrowserVoice();
-      }
-    })();
+    if (window.speechSynthesis) {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      u.pitch = 1.0;
+      u.lang = "en-US";
+      u.onend = afterSpeak;
+      u.onerror = afterSpeak;
+      window.speechSynthesis.speak(u);
+    } else {
+      afterSpeak();
+    }
   };
   voiceSpeakRef.current = voiceSpeak;  // Keep ref in sync
 
