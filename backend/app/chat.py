@@ -573,14 +573,19 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 break
         # Fallback: try to find category by ID directly
         if not match and cat_query.isdigit():
-            from .models import Category as CatModel
+            from .models import MenuCategory as CatModel
             direct_cat = db.query(CatModel).filter(CatModel.id == int(cat_query)).first()
             if direct_cat:
-                match = direct_cat
-                # Also fix the session restaurant_id if it was missing
-                if not session.restaurant_id:
-                    _set_session_state(db, session, restaurant_id=direct_cat.restaurant_id)
-                    categories = crud.list_categories(db, direct_cat.restaurant_id)
+                # Only accept the category if it belongs to the current restaurant
+                # (prevents cross-restaurant menu leaks)
+                if session.restaurant_id and direct_cat.restaurant_id != session.restaurant_id:
+                    direct_cat = None  # Wrong restaurant — ignore
+                if direct_cat:
+                    match = direct_cat
+                    # Also fix the session restaurant_id if it was missing
+                    if not session.restaurant_id:
+                        _set_session_state(db, session, restaurant_id=direct_cat.restaurant_id)
+                        categories = crud.list_categories(db, direct_cat.restaurant_id)
         if match:
             items = _items_data(db, match.id)
             cats = _categories_data(db, session.restaurant_id or match.restaurant_id)
