@@ -728,7 +728,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             item_parsed = [(single, 1)]
 
     # Step 2: If fuzzy didn't match, ask Sarvam AI LLM to match
-    if not item_parsed and len(input_words) >= 2:
+    if not item_parsed:
         llm_item = _llm_match_item(cleaned, all_items)
         if llm_item:
             item_parsed = [(llm_item, 1)]
@@ -763,27 +763,26 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     categories = crud.list_categories(db, session.restaurant_id)
     cat_match = None
 
-    # Pass 1: Exact match
+    # Pass 1: Exact match only (input matches category name exactly)
     for cat in categories:
         if cat.name.lower() == lower or str(cat.id) == lower:
             cat_match = cat
             break
 
-    # Pass 2: Partial substring match
-    if not cat_match:
+    # Pass 2: Single-word partial match ONLY
+    # For multi-word inputs like "samosa chat", DO NOT match category "Chat"
+    # because the user is clearly asking for a menu item, not a category
+    if not cat_match and len(input_words) == 1:
         for cat in categories:
             cat_lower = cat.name.lower()
             cat_words = [w.strip() for w in cat_lower.replace("/", " ").split()]
-            input_words = lower.split()
-            for iw in input_words:
-                for cw in cat_words:
-                    if len(iw) >= 3 and (iw in cw or cw in iw):
-                        cat_match = cat
-                        break
-                    if len(iw) >= 3 and _similarity(iw, cw) >= 0.75:
-                        cat_match = cat
-                        break
-                if cat_match:
+            iw = input_words[0]
+            for cw in cat_words:
+                if len(iw) >= 3 and (iw in cw or cw in iw):
+                    cat_match = cat
+                    break
+                if len(iw) >= 3 and _similarity(iw, cw) >= 0.75:
+                    cat_match = cat
                     break
             if cat_match:
                 break
