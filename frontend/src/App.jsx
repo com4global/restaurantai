@@ -412,30 +412,30 @@ export default function App() {
     // --- PRIMARY: Sarvam AI Bulbul v3 TTS ---
     const useSarvamTTS = async () => {
       try {
-        const { voiceTTS } = await import("./api.js");
         const result = await voiceTTS(text, "en-IN", "kavya");
         if (result.audio_base64) {
-          const audioData = atob(result.audio_base64);
-          const audioArray = new Uint8Array(audioData.length);
-          for (let i = 0; i < audioData.length; i++) {
-            audioArray[i] = audioData.charCodeAt(i);
+          // Decode base64 to ArrayBuffer
+          const binaryStr = atob(result.audio_base64);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
           }
-          const blob = new Blob([audioArray], { type: "audio/wav" });
-          const url = URL.createObjectURL(blob);
-          const audio = new Audio(url);
-          voiceAudioRef.current = audio;
-          audio.onended = () => {
-            URL.revokeObjectURL(url);
-            voiceAudioRef.current = null;
-            afterSpeak();
-          };
-          audio.onerror = () => {
-            URL.revokeObjectURL(url);
-            voiceAudioRef.current = null;
-            // Fallback to browser TTS
-            fallbackBrowserTTS(text, afterSpeak);
-          };
-          audio.play().catch(() => fallbackBrowserTTS(text, afterSpeak));
+
+          // Use AudioContext for reliable mobile playback
+          // (works because user already tapped mic button = user gesture)
+          const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
+          audioContextRef.current = ctx;
+          if (ctx.state === "suspended") await ctx.resume();
+
+          const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(ctx.destination);
+          source.onended = afterSpeak;
+          source.start(0);
+
+          // Store source so we can stop it if needed
+          voiceAudioRef.current = { pause: () => { try { source.stop(); } catch (e) { } } };
           return;
         }
         // No audio returned, fallback
