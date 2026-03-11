@@ -720,14 +720,36 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
     all_items = _get_all_restaurant_items(db, session.restaurant_id)
     input_words = lower.split()
 
-    # Step 1: Try fuzzy item matching first
-    item_parsed = _parse_order_items(cleaned, all_items)
-    if not item_parsed:
-        single = _find_best_item(cleaned, all_items)
-        if single:
-            item_parsed = [(single, 1)]
+    # Step 0: If user is already in a category, try matching within THAT category first
+    # This prevents "samosa chat" from re-matching category "Chat" when user is already viewing Chat items
+    category_items = []
+    if session.category_id:
+        category_items = [i for i in all_items if i.category_id == session.category_id]
 
-    # Step 2: If fuzzy didn't match, ask Sarvam AI LLM to match
+    item_parsed = []
+
+    # Step 1a: Try fuzzy item matching within current category first
+    if category_items:
+        item_parsed = _parse_order_items(cleaned, category_items)
+        if not item_parsed:
+            single = _find_best_item(cleaned, category_items)
+            if single:
+                item_parsed = [(single, 1)]
+        # Step 1b: Try LLM matching within current category
+        if not item_parsed:
+            llm_item = _llm_match_item(cleaned, category_items)
+            if llm_item:
+                item_parsed = [(llm_item, 1)]
+
+    # Step 2: If not found in current category, try ALL restaurant items
+    if not item_parsed:
+        item_parsed = _parse_order_items(cleaned, all_items)
+        if not item_parsed:
+            single = _find_best_item(cleaned, all_items)
+            if single:
+                item_parsed = [(single, 1)]
+
+    # Step 3: LLM fallback on all items
     if not item_parsed:
         llm_item = _llm_match_item(cleaned, all_items)
         if llm_item:
@@ -788,15 +810,19 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 break
 
     # Pass 3: Fuzzy match on full name
+    # For multi-word inputs, only compare full input vs full category name
+    # (prevents "samosa chat" from matching category "Chat" via per-word similarity)
     if not cat_match:
         best_cat, best_score = None, 0.0
         for cat in categories:
             cat_lower = cat.name.lower()
             score = _similarity(lower, cat_lower)
-            for word in cat_lower.replace("/", " ").split():
-                word = word.strip()
-                if word:
-                    score = max(score, _similarity(lower, word))
+            # Only do per-word matching for SINGLE-word inputs
+            if len(input_words) == 1:
+                for word in cat_lower.replace("/", " ").split():
+                    word = word.strip()
+                    if word:
+                        score = max(score, _similarity(lower, word))
             if score > best_score:
                 best_score = score
                 best_cat = cat
