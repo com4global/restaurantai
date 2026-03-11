@@ -410,39 +410,47 @@ export default function App() {
     // }
 
     // --- PRIMARY: Sarvam AI Bulbul v3 TTS ---
+    // Safety timeout: if TTS takes >15s, fall back to browser voice
+    let ttsCompleted = false;
+    const safeAfterSpeak = () => { if (!ttsCompleted) { ttsCompleted = true; afterSpeak(); } };
+    const safetyTimer = setTimeout(() => {
+      console.warn("Sarvam TTS timeout, using browser fallback");
+      if (!ttsCompleted) { ttsCompleted = true; fallbackBrowserTTS(text, afterSpeak); }
+    }, 15000);
+
     const useSarvamTTS = async () => {
       try {
         const result = await voiceTTS(text, "en-IN", "kavya");
+        if (ttsCompleted) return; // Safety timer already fired
         if (result.audio_base64) {
-          // Decode base64 to ArrayBuffer
           const binaryStr = atob(result.audio_base64);
           const bytes = new Uint8Array(binaryStr.length);
           for (let i = 0; i < binaryStr.length; i++) {
             bytes[i] = binaryStr.charCodeAt(i);
           }
 
-          // Use AudioContext for reliable mobile playback
-          // (works because user already tapped mic button = user gesture)
-          const ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
-          audioContextRef.current = ctx;
+          // Reuse AudioContext created at mic button tap
+          const ctx = audioContextRef.current;
+          if (!ctx) { clearTimeout(safetyTimer); fallbackBrowserTTS(text, safeAfterSpeak); return; }
           if (ctx.state === "suspended") await ctx.resume();
 
           const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+          if (ttsCompleted) return;
+          clearTimeout(safetyTimer);
           const source = ctx.createBufferSource();
           source.buffer = audioBuffer;
           source.connect(ctx.destination);
-          source.onended = afterSpeak;
+          source.onended = safeAfterSpeak;
           source.start(0);
-
-          // Store source so we can stop it if needed
           voiceAudioRef.current = { pause: () => { try { source.stop(); } catch (e) { } } };
           return;
         }
-        // No audio returned, fallback
-        fallbackBrowserTTS(text, afterSpeak);
+        clearTimeout(safetyTimer);
+        fallbackBrowserTTS(text, safeAfterSpeak);
       } catch (err) {
         console.warn("Sarvam TTS failed, using browser fallback:", err);
-        fallbackBrowserTTS(text, afterSpeak);
+        clearTimeout(safetyTimer);
+        fallbackBrowserTTS(text, safeAfterSpeak);
       }
     };
 
@@ -541,6 +549,14 @@ export default function App() {
     } else {
       voiceModeRef.current = true;
       setVoiceMode(true);
+      // Create AudioContext NOW on user gesture (mic button tap)
+      // This unlocks audio playback for Sarvam TTS later
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioContextRef.current.state === "suspended") {
+        audioContextRef.current.resume();
+      }
       // Short initial prompt based on current state
       let prompt;
       if (!selectedRestaurant) prompt = "Which restaurant would you like?";
