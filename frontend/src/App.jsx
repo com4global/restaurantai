@@ -201,7 +201,9 @@ export default function App() {
   const inputRef = useRef(null);
   const chatEndRef = useRef(null);
   const [addedItemId, setAddedItemId] = useState(null);
-  const doSendRef = useRef(null); // Ref to always access latest doSend (avoids stale closures in voice callbacks)
+  const doSendRef = useRef(null);
+  const voiceSpeakRef = useRef(null);
+  const voiceStartListeningRef = useRef(null);
 
   // ===================== EFFECTS =====================
 
@@ -379,7 +381,7 @@ export default function App() {
   const voiceAudioRef = useRef(null); // for playing TTS audio
 
   // Speak text — use browser speechSynthesis for instant response (no network latency)
-  const voiceSpeak = useCallback((text, autoListenAfter = true) => {
+  const voiceSpeak = (text, autoListenAfter = true) => {
     if (!text) return;
     // Stop any playing audio
     if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
@@ -388,7 +390,7 @@ export default function App() {
 
     const afterSpeak = () => {
       if (autoListenAfter && voiceModeRef.current) {
-        voiceStartListening();
+        voiceStartListeningRef.current();  // Use ref to avoid stale closure
       } else {
         setVoiceState("idle");
       }
@@ -404,13 +406,13 @@ export default function App() {
       u.onerror = afterSpeak;
       window.speechSynthesis.speak(u);
     } else {
-      // No speech synthesis available, just skip to listening
       afterSpeak();
     }
-  }, []);
+  };
+  voiceSpeakRef.current = voiceSpeak;  // Keep ref in sync
 
   // Start listening via browser SpeechRecognition (fast, works on mobile)
-  const voiceStartListening = useCallback(() => {
+  const voiceStartListening = () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       console.error("SpeechRecognition not supported");
@@ -442,7 +444,7 @@ export default function App() {
       if (finalText) {
         setIsListening(false);
         setVoiceState("processing");
-        doSendRef.current(finalText.trim(), true);
+        doSendRef.current(finalText.trim(), true);  // Use ref to avoid stale closure
       }
     };
 
@@ -450,8 +452,7 @@ export default function App() {
       console.error("SpeechRecognition error:", e.error);
       setIsListening(false);
       if (e.error === 'no-speech' && voiceModeRef.current) {
-        // No speech detected, retry
-        setTimeout(() => { if (voiceModeRef.current) voiceStartListening(); }, 500);
+        setTimeout(() => { if (voiceModeRef.current) voiceStartListeningRef.current(); }, 500);
       } else if (e.error === 'aborted') {
         // Intentionally aborted, do nothing
       } else {
@@ -462,9 +463,8 @@ export default function App() {
 
     rec.onend = () => {
       setIsListening(false);
-      // If voice mode still active but no final result, restart
       if (voiceModeRef.current && voiceStateRef.current === "listening") {
-        setTimeout(() => { if (voiceModeRef.current) voiceStartListening(); }, 300);
+        setTimeout(() => { if (voiceModeRef.current) voiceStartListeningRef.current(); }, 300);
       }
     };
 
@@ -474,10 +474,11 @@ export default function App() {
       console.error("Failed to start recognition:", err);
       setVoiceState("idle");
     }
-  }, []);
+  };
+  voiceStartListeningRef.current = voiceStartListening;  // Keep ref in sync
 
   // Toggle voice mode
-  const toggleVoiceMode = useCallback(() => {
+  const toggleVoiceMode = () => {
     if (voiceMode) {
       voiceModeRef.current = false;
       setVoiceMode(false); setVoiceState("idle"); setVoiceTranscript(""); setIsListening(false);
@@ -486,14 +487,14 @@ export default function App() {
     } else {
       voiceModeRef.current = true;
       setVoiceMode(true);
-      // Short initial prompt
+      // Short initial prompt based on current state
       let prompt;
       if (!selectedRestaurant) prompt = "Which restaurant would you like?";
-      else if (currentItems.length > 0) prompt = "Which item to add?";
+      else if (currentItems.length > 0) prompt = "Which item would you like to add?";
       else prompt = "Say a category name.";
-      voiceSpeak(prompt, true);
+      voiceSpeakRef.current(prompt, true);
     }
-  }, [voiceMode, selectedRestaurant, currentItems, voiceSpeak]);
+  };
 
   const startListening = () => { toggleVoiceMode(); };
 
@@ -527,30 +528,36 @@ export default function App() {
         setTimeout(() => { fetchCart(token).then(setCartData).catch(() => { }); }, 300);
       }
 
+      // Update selectedRestaurant from backend response (for voice-driven restaurant switching)
+      if (res.restaurant_id && (!selectedRestaurant || selectedRestaurant.id !== res.restaurant_id)) {
+        const matchedRest = restaurants.find(r => r.id === res.restaurant_id);
+        if (matchedRest) setSelectedRestaurant(matchedRest);
+      }
+
       // Voice mode: use voice_prompt from backend (fast, no extra API call)
       if (fromVoice && voiceModeRef.current) {
         const voiceReply = res.voice_prompt || res.reply;
         if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
-          voiceSpeak("Order placed! Thank you!", false);
+          voiceSpeakRef.current("Order placed! Thank you!", false);
           setTimeout(() => {
             voiceModeRef.current = false;
             setVoiceMode(false); setVoiceState("idle");
           }, 2000);
         } else {
           // Speak the voice_prompt and auto-listen after
-          voiceSpeak(voiceReply, true);
+          voiceSpeakRef.current(voiceReply, true);
         }
       }
 
       setStatus("Ready.");
     } catch (err) {
-      setVoiceState(voiceModeRef.current ? "idle" : "idle");
+      setVoiceState("idle");
       if (err.status === 401) {
         localStorage.removeItem("token"); setToken(null);
         setStatus("Session expired. Please log in again.");
       } else { setStatus(err.message || "Failed"); }
       if (fromVoice && voiceModeRef.current) {
-        voiceSpeak("Error. Try again.", true);
+        voiceSpeakRef.current("Error. Try again.", true);
       }
     }
   };
