@@ -35,6 +35,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "iOS": {
+      "developmentTeam": "NY289MQC7H"
+    },
     "macOS": {
       "minimumSystemVersion": "10.15"
     }

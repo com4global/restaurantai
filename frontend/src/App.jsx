@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
@@ -204,6 +204,15 @@ export default function App() {
   const doSendRef = useRef(null);
   const voiceSpeakRef = useRef(null);
   const voiceStartListeningRef = useRef(null);
+
+  // Budget Optimizer
+  const [showOptimizer, setShowOptimizer] = useState(false);
+  const [optPeople, setOptPeople] = useState(5);
+  const [optBudget, setOptBudget] = useState(50);
+  const [optCuisine, setOptCuisine] = useState("");
+  const [optResults, setOptResults] = useState(null);
+  const [optLoading, setOptLoading] = useState(false);
+  const [optError, setOptError] = useState("");
 
   // ===================== EFFECTS =====================
 
@@ -761,6 +770,19 @@ export default function App() {
               </motion.div>
             )}
 
+            {/* Budget Optimizer Floating Button */}
+            <motion.button
+              className="optimizer-fab"
+              onClick={() => { if (!token) { setTab("profile"); return; } setShowOptimizer(true); }}
+              whileHover={{ scale: 1.08 }}
+              whileTap={{ scale: 0.95 }}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.5 }}
+            >
+              💰 Budget Optimizer
+            </motion.button>
+
             {/* All Restaurants Grid */}
             {restaurants.length > 0 && (
               <>
@@ -1143,20 +1165,38 @@ export default function App() {
 
       {/* Cart Panel */}
       <AnimatePresence>
-        {showCartPanel && cartData && cartData.restaurants && (
+        {showCartPanel && cartData && cartData.restaurants && cartData.restaurants.length > 0 && (
           <motion.div className="cart-panel" initial={{ y: 300 }} animate={{ y: 0 }} exit={{ y: 300 }} transition={{ type: "spring", damping: 25 }}>
             <div className="cart-panel-header">
               <span>🛒 Your Cart</span>
-              <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button className="cart-clear-btn" onClick={async () => {
+                  try {
+                    const c = await clearCart(token);
+                    setCartData(c);
+                    if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
+                  } catch { }
+                }}>🗑 Clear All</button>
+                <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
+              </div>
             </div>
             <div className="cart-panel-body">
               {cartData.restaurants.map((group) => (
                 <div key={group.restaurant_id} className="cart-restaurant-group">
                   <div className="cart-restaurant-name">🍽️ {group.restaurant_name}</div>
                   {group.items.map((item, i) => (
-                    <div key={i} className="cart-item-row">
+                    <div key={item.order_item_id || i} className="cart-item-row">
                       <span>{item.quantity}x {item.name}</span>
-                      <span>${(item.line_total_cents / 100).toFixed(2)}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span>${(item.line_total_cents / 100).toFixed(2)}</span>
+                        <button className="cart-item-delete" onClick={async () => {
+                          try {
+                            const c = await removeCartItem(token, item.order_item_id);
+                            setCartData(c);
+                            if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
+                          } catch { }
+                        }}>✕</button>
+                      </div>
                     </div>
                   ))}
                   <div className="cart-subtotal">Subtotal: ${(group.subtotal_cents / 100).toFixed(2)}</div>
@@ -1190,6 +1230,134 @@ export default function App() {
                 {checkingOut ? "⏳ Processing Payment..." : "💳 Pay & Place Order"}
               </button>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Budget Optimizer Modal */}
+      <AnimatePresence>
+        {showOptimizer && (
+          <motion.div className="optimizer-overlay"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={() => setShowOptimizer(false)}
+          >
+            <motion.div className="optimizer-modal"
+              initial={{ opacity: 0, y: 60, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 40, scale: 0.95 }}
+              transition={{ type: "spring", damping: 25, stiffness: 300 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="optimizer-header">
+                <span className="optimizer-title">💰 AI Budget Optimizer</span>
+                <button className="optimizer-close" onClick={() => setShowOptimizer(false)}>✕</button>
+              </div>
+
+              <div className="optimizer-body">
+                <p className="optimizer-desc">Find the best meal combo for your group — powered by AI.</p>
+
+                <div className="optimizer-field">
+                  <label>👥 People to feed</label>
+                  <div className="optimizer-stepper">
+                    <button onClick={() => setOptPeople(Math.max(1, optPeople - 1))}>−</button>
+                    <span className="optimizer-stepper-value">{optPeople}</span>
+                    <button onClick={() => setOptPeople(Math.min(50, optPeople + 1))}>+</button>
+                  </div>
+                </div>
+
+                <div className="optimizer-field">
+                  <label>💵 Budget ($)</label>
+                  <input type="number" className="optimizer-input" min="1" max="1000"
+                    value={optBudget} onChange={(e) => setOptBudget(Number(e.target.value) || 0)} />
+                </div>
+
+                <div className="optimizer-field">
+                  <label>🍽️ Cuisine (optional)</label>
+                  <select className="optimizer-input" value={optCuisine} onChange={(e) => setOptCuisine(e.target.value)}>
+                    <option value="">Any cuisine</option>
+                    <option value="Indian">Indian</option>
+                    <option value="Italian">Italian</option>
+                    <option value="Chinese">Chinese</option>
+                    <option value="Mexican">Mexican</option>
+                    <option value="Thai">Thai</option>
+                    <option value="Japanese">Japanese</option>
+                    <option value="American">American</option>
+                  </select>
+                </div>
+
+                <motion.button className="optimizer-find-btn"
+                  disabled={optLoading || optBudget < 1 || optPeople < 1}
+                  whileTap={{ scale: 0.97 }}
+                  onClick={async () => {
+                    setOptLoading(true); setOptError(""); setOptResults(null);
+                    try {
+                      const res = await mealOptimizer({
+                        people: optPeople,
+                        budgetCents: optBudget * 100,
+                        cuisine: optCuisine || undefined,
+                      });
+                      setOptResults(res);
+                      if (!res.combos || res.combos.length === 0) {
+                        setOptError("No combos found. Try a higher budget or fewer people.");
+                      }
+                    } catch (err) {
+                      setOptError(err.message || "Optimizer failed");
+                    }
+                    setOptLoading(false);
+                  }}
+                >
+                  {optLoading ? "⏳ Finding best combos..." : "🔍 Find Best Combo"}
+                </motion.button>
+
+                {optError && <div className="optimizer-error">{optError}</div>}
+
+                {/* Results */}
+                {optResults && optResults.combos && optResults.combos.length > 0 && (
+                  <div className="optimizer-results">
+                    {optResults.combos.map((combo, ci) => (
+                      <motion.div key={ci} className="optimizer-combo-card"
+                        initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: ci * 0.1 }}
+                      >
+                        <div className="combo-header">
+                          <span className="combo-rank">{ci === 0 ? '🏆' : ci === 1 ? '🥈' : '🥉'}</span>
+                          <span className="combo-restaurant">{combo.restaurant_name}</span>
+                          <span className="combo-score">Score: {combo.score.toFixed(1)}</span>
+                        </div>
+                        <div className="combo-items">
+                          {combo.items.map((item, ii) => (
+                            <div key={ii} className="combo-item-row">
+                              <span>{getFoodEmoji(item.name)} {item.quantity}x {item.name}</span>
+                              <span className="combo-item-price">${(item.price_cents * item.quantity / 100).toFixed(2)}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="combo-footer">
+                          <div className="combo-stats">
+                            <span className="combo-total">Total: ${(combo.total_cents / 100).toFixed(2)}</span>
+                            <span className="combo-feeds">Feeds {combo.feeds_people} people</span>
+                          </div>
+                          <button className="combo-order-btn" onClick={async () => {
+                            setShowOptimizer(false);
+                            // Add all items to cart in one shot via direct API
+                            try {
+                              const cartItems = combo.items.map(i => ({ item_id: i.item_id, quantity: i.quantity }));
+                              const cart = await addComboToCart(token, combo.restaurant_id, cartItems);
+                              setCartData(cart);
+                              setShowCartPanel(true);
+                            } catch (e) {
+                              console.error('Failed to add items to cart:', e);
+                            }
+                          }}>
+                            🛒 Order This
+                          </button>
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

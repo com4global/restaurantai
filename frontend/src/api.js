@@ -111,6 +111,28 @@ export async function fetchCart(token) {
   });
 }
 
+export async function addComboToCart(token, restaurantId, items) {
+  return request("/cart/add-combo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ restaurant_id: restaurantId, items }),
+  });
+}
+
+export async function removeCartItem(token, orderItemId) {
+  return request(`/cart/item/${orderItemId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function clearCart(token) {
+  return request("/cart/clear", {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // --- Order Management APIs ---
 
 export async function fetchOrders(token, restaurantId, { search, dateFrom, dateTo } = {}) {
@@ -251,5 +273,18 @@ export async function createCheckoutSession(token) {
   return request("/checkout/create-session", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// --- AI Budget Optimizer ---
+
+export async function mealOptimizer({ people, budgetCents, cuisine, restaurantId } = {}) {
+  const body = { people, budget_cents: budgetCents };
+  if (cuisine) body.cuisine = cuisine;
+  if (restaurantId) body.restaurant_id = restaurantId;
+  return request("/ai/meal-optimizer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }

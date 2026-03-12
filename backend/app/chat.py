@@ -497,6 +497,70 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             voice_prompt="Which restaurant would you like to order from?",
         )
 
+    # --- AI Budget Optimizer intent ---
+    budget_patterns = [
+        r'feed\s+(\d+)\s+people?\s+(?:for\s+)?(?:under\s+)?\$?(\d+)',
+        r'meal\s+for\s+(\d+)\s+(?:people?\s+)?(?:under\s+)?\$?(\d+)',
+        r'budget\s+(?:meal\s+)?(?:for\s+)?(\d+)\s+people?\s+\$?(\d+)',
+        r'(\d+)\s+people?\s+(?:under\s+|for\s+|within\s+)\$?(\d+)',
+        r'(?:order|food)\s+for\s+(\d+)\s+(?:people?\s+)?(?:under\s+)?\$?(\d+)',
+    ]
+    for bp in budget_patterns:
+        budget_match = re.search(bp, lower)
+        if budget_match:
+            people = int(budget_match.group(1))
+            budget_dollars = int(budget_match.group(2))
+            budget_cents = budget_dollars * 100
+
+            # Extract optional cuisine hint
+            cuisine = None
+            cuisine_match = re.search(r'(?:cuisine|type|style)[:\s]+(\w+)', lower)
+            if not cuisine_match:
+                for c in ["indian", "italian", "chinese", "mexican", "thai", "japanese", "american"]:
+                    if c in lower:
+                        cuisine = c.capitalize()
+                        break
+            else:
+                cuisine = cuisine_match.group(1).capitalize()
+
+            from . import optimizer
+            results = optimizer.optimize_meal(
+                db,
+                people=people,
+                budget_cents=budget_cents,
+                cuisine=cuisine,
+                restaurant_id=session.restaurant_id,
+            )
+
+            if not results:
+                return _result(
+                    f"Sorry, I couldn't find a meal combo for {people} people under ${budget_dollars}. "
+                    f"Try increasing your budget or reducing the number of people.",
+                    voice_prompt=f"I couldn't find a combo for {people} people under {budget_dollars} dollars. Try a higher budget.",
+                )
+
+            # Format the best combo
+            best = results[0]
+            lines = [f"💰 **Best combo at {best['restaurant_name']}:**\n"]
+            for item in best["items"]:
+                price = f"${item['price_cents'] * item['quantity'] / 100:.2f}"
+                lines.append(f"  {item['quantity']}x {item['name']} — {price}")
+            total = f"${best['total_cents'] / 100:.2f}"
+            lines.append(f"\n**Total: {total}**")
+            lines.append(f"**Feeds: {best['feeds_people']} people**")
+
+            if len(results) > 1:
+                lines.append(f"\n_({len(results) - 1} more option{'s' if len(results) > 2 else ''} available)_")
+
+            reply = "\n".join(lines)
+            voice_items = ", ".join(f"{i['quantity']} {i['name']}" for i in best["items"])
+            voice = (
+                f"Best combo at {best['restaurant_name']}. "
+                f"{voice_items}. Total {total}, feeds {best['feeds_people']} people."
+            )
+
+            return _result(reply, voice_prompt=voice)
+
     # --- Restaurant selection via #slug ---
     if cleaned.startswith("#"):
         slug = cleaned.lstrip("#").strip().lower()

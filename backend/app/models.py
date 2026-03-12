@@ -36,6 +36,7 @@ class Restaurant(Base):
     phone = Column(String(20), nullable=True)
     notification_email = Column(String(255), nullable=True)
     notification_phone = Column(String(20), nullable=True)
+    rating = Column(Float, nullable=True)  # 1.0-5.0 star rating
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -65,6 +66,11 @@ class MenuItem(Base):
     description = Column(Text, nullable=True)
     price_cents = Column(Integer, nullable=False)
     is_available = Column(Boolean, default=True, nullable=False)
+    portion_people = Column(Integer, nullable=True)       # how many people this feeds
+    cuisine = Column(String(60), nullable=True)            # e.g. "Indian", "Italian"
+    protein_type = Column(String(40), nullable=True)       # e.g. "chicken", "veg", "paneer"
+    calories = Column(Integer, nullable=True)
+    prep_time_mins = Column(Integer, nullable=True)
 
     category = relationship("MenuCategory", back_populates="items")
 

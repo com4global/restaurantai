@@ -91,6 +91,11 @@ class ItemCreate(BaseModel):
     description: str | None = None
     price_cents: int = Field(ge=0)
     is_available: bool = True
+    portion_people: int | None = None
+    cuisine: str | None = None
+    protein_type: str | None = None
+    calories: int | None = None
+    prep_time_mins: int | None = None
 
 
 class ItemUpdate(BaseModel):
@@ -98,6 +103,11 @@ class ItemUpdate(BaseModel):
     description: str | None = None
     price_cents: int | None = None
     is_available: bool | None = None
+    portion_people: int | None = None
+    cuisine: str | None = None
+    protein_type: str | None = None
+    calories: int | None = None
+    prep_time_mins: int | None = None
 
 
 class MenuCategoryOut(BaseModel):
@@ -114,6 +124,11 @@ class MenuItemOut(BaseModel):
     description: str | None
     price_cents: int
     is_available: bool
+    portion_people: int | None = None
+    cuisine: str | None = None
+    protein_type: str | None = None
+    calories: int | None = None
+    prep_time_mins: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -199,3 +214,34 @@ class CheckoutSessionOut(BaseModel):
     checkout_url: str
     session_id: str
 
+
+# --- Meal Optimizer schemas ---
+
+class MealOptimizerRequest(BaseModel):
+    people: int = Field(ge=1, le=50)
+    budget_cents: int = Field(ge=100)  # $1 minimum
+    cuisine: str | None = None
+    restaurant_id: int | None = None
+
+
+class MealOptimizerItem(BaseModel):
+    item_id: int
+    name: str
+    quantity: int
+    price_cents: int
+    portion_people: int
+
+
+class MealCombo(BaseModel):
+    restaurant_name: str
+    restaurant_id: int
+    items: list[MealOptimizerItem]
+    total_cents: int
+    feeds_people: int
+    score: float
+
+
+class MealOptimizerResponse(BaseModel):
+    combos: list[MealCombo]
+    people_requested: int
+    budget_cents: int

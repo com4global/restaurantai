@@ -9,10 +9,11 @@ import urllib.parse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from . import chat, crud, models, payments, schemas
+from . import chat, crud, models, optimizer, payments, schemas
 from .auth import create_access_token, get_current_user, verify_password
 from .config import settings
 from .db import get_db, engine
@@ -51,6 +52,27 @@ async def global_exception_handler(request, exc):
     )
 
 
+# --- AI Budget Optimizer ---
+@app.post("/ai/meal-optimizer", response_model=schemas.MealOptimizerResponse)
+def meal_optimizer(
+    payload: schemas.MealOptimizerRequest,
+    db: Session = Depends(get_db),
+):
+    """Find the best meal combos to feed N people under a budget."""
+    results = optimizer.optimize_meal(
+        db,
+        people=payload.people,
+        budget_cents=payload.budget_cents,
+        cuisine=payload.cuisine,
+        restaurant_id=payload.restaurant_id,
+    )
+    return schemas.MealOptimizerResponse(
+        combos=results,
+        people_requested=payload.people,
+        budget_cents=payload.budget_cents,
+    )
+
+
 # --- Multi-restaurant cart helper ---
 def _build_cart_summary(db: Session, user_id: int) -> dict:
     """Build grouped cart data across all pending orders for a user."""
@@ -64,6 +86,7 @@ def _build_cart_summary(db: Session, user_id: int) -> dict:
             mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
             line_total = oi.price_cents * oi.quantity
             items.append({
+                "order_item_id": oi.id,
                 "name": mi.name if mi else f"Item #{oi.menu_item_id}",
                 "quantity": oi.quantity,
                 "price_cents": oi.price_cents,
@@ -87,6 +110,81 @@ def get_cart(
     current_user=Depends(get_current_user),
 ):
     """Get all pending orders grouped by restaurant for the current user."""
+    return _build_cart_summary(db, current_user.id)
+
+
+@app.delete("/cart/item/{order_item_id}")
+def remove_cart_item(
+    order_item_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Remove a single item from the cart."""
+    oi = db.query(models.OrderItem).filter(models.OrderItem.id == order_item_id).first()
+    if not oi:
+        raise HTTPException(status_code=404, detail="Item not found")
+    order = db.query(models.Order).filter(models.Order.id == oi.order_id).first()
+    if not order or order.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your order")
+    db.delete(oi)
+    db.commit()
+    crud.recompute_order_total(db, order)
+    # If order has no items left, clean up the order
+    remaining = db.query(models.OrderItem).filter(models.OrderItem.order_id == order.id).count()
+    if remaining == 0:
+        _detach_and_delete_order(db, order)
+    return _build_cart_summary(db, current_user.id)
+
+
+def _detach_and_delete_order(db: Session, order):
+    """Nullify FK references in chat_sessions & payments, then delete the order."""
+    db.query(models.ChatSession).filter(models.ChatSession.order_id == order.id).update({"order_id": None})
+    db.query(models.Payment).filter(models.Payment.order_id == order.id).update({"order_id": None})
+    db.delete(order)
+    db.commit()
+
+
+@app.delete("/cart/clear")
+def clear_cart(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Clear all pending orders for the current user."""
+    pending_orders = crud.get_user_pending_orders(db, current_user.id)
+    for order in pending_orders:
+        for oi in order.items:
+            db.delete(oi)
+        _detach_and_delete_order(db, order)
+    return _build_cart_summary(db, current_user.id)
+
+
+class ComboItem(BaseModel):
+    item_id: int
+    quantity: int
+
+
+class AddComboRequest(BaseModel):
+    restaurant_id: int
+    items: list[ComboItem]
+
+
+@app.post("/cart/add-combo")
+def add_combo_to_cart(
+    payload: AddComboRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Add multiple items to cart in one shot (used by Budget Optimizer)."""
+    order = crud.get_user_order_for_restaurant(db, current_user.id, payload.restaurant_id)
+    if not order:
+        order = crud.create_order(db, current_user.id, payload.restaurant_id)
+
+    for ci in payload.items:
+        menu_item = db.query(models.MenuItem).filter(models.MenuItem.id == ci.item_id).first()
+        if menu_item:
+            crud.add_order_item(db, order, menu_item, ci.quantity)
+
+    crud.recompute_order_total(db, order)
     return _build_cart_summary(db, current_user.id)
 
 
@@ -407,7 +505,18 @@ def create_item(category_id: int, payload: schemas.ItemCreate, db: Session = Dep
     c = db.query(models.MenuCategory).join(models.Restaurant).filter(models.MenuCategory.id == category_id, models.Restaurant.owner_id == current_user.id).first()
     if not c:
         raise HTTPException(status_code=404, detail="Category not found")
-    item = models.MenuItem(category_id=category_id, name=payload.name, description=payload.description, price_cents=payload.price_cents, is_available=payload.is_available)
+    item = models.MenuItem(
+        category_id=category_id,
+        name=payload.name,
+        description=payload.description,
+        price_cents=payload.price_cents,
+        is_available=payload.is_available,
+        portion_people=payload.portion_people,
+        cuisine=payload.cuisine,
+        protein_type=payload.protein_type,
+        calories=payload.calories,
+        prep_time_mins=payload.prep_time_mins,
+    )
     db.add(item)
     db.commit()
     db.refresh(item)
