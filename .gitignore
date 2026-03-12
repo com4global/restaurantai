@@ -33,6 +33,12 @@ node_modules/
 # Tauri (Rust build artifacts)
 # ============================
 src-tauri/target/
+src-tauri/gen/
+
+# ============================
+# Environment (local overrides)
+# ============================
+.env.local
 
 # ============================
 # IDE / Editor
