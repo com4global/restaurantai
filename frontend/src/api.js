@@ -97,6 +97,16 @@ export async function importMenuFromUrl(token, url) {
   });
 }
 
+export async function extractMenuFromFile(token, restaurantId, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return request(`/owner/restaurants/${restaurantId}/extract-menu-file`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: formData,
+  });
+}
+
 export async function saveImportedMenu(token, restaurantId, menuData) {
   return request(`/owner/restaurants/${restaurantId}/import-menu`, {
     method: "POST",

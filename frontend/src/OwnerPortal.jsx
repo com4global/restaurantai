@@ -5,6 +5,7 @@ import {
     getMyRestaurants,
     createRestaurant,
     importMenuFromUrl,
+    extractMenuFromFile,
     saveImportedMenu,
     fetchOrders,
     fetchArchivedOrders,
@@ -49,6 +50,8 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     const [importError, setImportError] = useState("");
     const [importRestId, setImportRestId] = useState(null);
     const [saveStatus, setSaveStatus] = useState("");
+    const [extractMode, setExtractMode] = useState(null); // "url" | "image" | null
+    const [dragActive, setDragActive] = useState(false);
 
     // Orders Dashboard
     const [activeTab, setActiveTab] = useState({}); // { restaurantId: "orders" | "menu" | "settings" }
@@ -391,6 +394,42 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
         });
     }
 
+    // --- Extract from image file ---
+    async function handleExtractFromFile(file) {
+        if (!file || !importRestId) return;
+        const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+        const ext = "." + file.name.split(".").pop().toLowerCase();
+        if (!allowed.includes(ext)) {
+            setImportError("Unsupported file type. Use JPG, PNG, or WebP.");
+            return;
+        }
+        if (file.size > 10 * 1024 * 1024) {
+            setImportError("File too large. Max 10MB.");
+            return;
+        }
+        setImportLoading(true);
+        setImportError("");
+        setImportedMenu(null);
+        try {
+            const data = await extractMenuFromFile(token, importRestId, file);
+            if (data.categories) {
+                data.categories = data.categories
+                    .filter(c => c.items && c.items.length > 0)
+                    .map(c => ({
+                        ...c,
+                        items: c.items.map(item => ({
+                            ...item,
+                            price: item.price_cents ? (item.price_cents / 100) : (item.price || 0),
+                        }))
+                    }));
+            }
+            setImportedMenu(data);
+        } catch (err) {
+            setImportError(err.message || "Extraction failed. Try a clearer photo.");
+        }
+        setImportLoading(false);
+    }
+
     // --- Order status update ---
     async function handleStatusChange(restaurantId, orderId, newStatus) {
         try {
@@ -685,8 +724,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                     <button className={`owner-tab-btn ${tab === "menu" ? "active" : ""}`} onClick={() => setTab(r.id, "menu")}>
                                         🍽️ Menu
                                     </button>
+                                    <button className={`owner-tab-btn ${tab === "extract" ? "active" : ""}`} onClick={() => { setTab(r.id, "extract"); setImportRestId(r.id); setExtractMode(null); setImportedMenu(null); setImportError(""); setSaveStatus(""); }}>
+                                        🤖 Extract
+                                    </button>
                                     <button className={`owner-tab-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab(r.id, "settings")}>
-                                        ⚙️ Notifications
+                                        ⚙️ Settings
                                     </button>
                                 </div>
 
@@ -868,18 +910,179 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                 {/* MENU TAB */}
                                 {tab === "menu" && (
                                     <div className="owner-menu-panel">
-                                        <button
-                                            className="owner-import-trigger"
-                                            onClick={() => {
-                                                setImportRestId(r.id);
-                                                setImportedMenu(null);
-                                                setImportUrl("");
-                                                setImportError("");
-                                                setSaveStatus("");
-                                            }}
-                                        >
-                                            🤖 Import Menu from Website
-                                        </button>
+                                        <p className="owner-empty">Switch to the <strong>🤖 Extract</strong> tab to import menu from website or image.</p>
+                                    </div>
+                                )}
+
+                                {/* EXTRACT TAB */}
+                                {tab === "extract" && (
+                                    <div className="owner-extract-panel">
+                                        {!extractMode && !importedMenu && (
+                                            <>
+                                                <div className="extract-header">
+                                                    <h4>📋 Extract Menu</h4>
+                                                    <p className="extract-header-desc">Choose a source to automatically extract your restaurant menu</p>
+                                                </div>
+                                                <div className="extract-mode-cards">
+                                                    <button className="extract-mode-card" onClick={() => { setExtractMode("url"); setImportedMenu(null); setImportError(""); }}>
+                                                        <div className="extract-mode-icon">🌐</div>
+                                                        <div className="extract-mode-title">Website</div>
+                                                        <div className="extract-mode-desc">Auto-scrape from URL</div>
+                                                        <div className="extract-mode-arrow">→</div>
+                                                    </button>
+                                                    <button className="extract-mode-card" onClick={() => { setExtractMode("image"); setImportedMenu(null); setImportError(""); }}>
+                                                        <div className="extract-mode-icon">📸</div>
+                                                        <div className="extract-mode-title">Photo</div>
+                                                        <div className="extract-mode-desc">Upload menu image</div>
+                                                        <div className="extract-mode-arrow">→</div>
+                                                    </button>
+                                                    <button className="extract-mode-card extract-mode-disabled">
+                                                        <div className="extract-mode-icon">📄</div>
+                                                        <div className="extract-mode-title">Document</div>
+                                                        <div className="extract-mode-desc">PDF / Excel — soon</div>
+                                                        <div className="extract-mode-badge">Coming Soon</div>
+                                                    </button>
+                                                </div>
+                                            </>
+                                        )}
+
+                                        {/* URL Mode */}
+                                        {extractMode === "url" && !importedMenu && (
+                                            <div className="extract-form">
+                                                <div className="extract-form-header">
+                                                    <button className="extract-back-btn" onClick={() => setExtractMode(null)}>← Back</button>
+                                                    <span className="extract-form-step">Step 1 of 2</span>
+                                                </div>
+                                                <h4>🌐 Enter Restaurant Website</h4>
+                                                <p className="extract-form-hint">Paste the menu page URL — our AI will scan the entire site and extract all items with prices.</p>
+                                                <input
+                                                    type="url"
+                                                    placeholder="https://restaurant-website.com/menu"
+                                                    value={importUrl}
+                                                    onChange={(e) => setImportUrl(e.target.value)}
+                                                    className="extract-url-input"
+                                                />
+                                                <button
+                                                    className="extract-action-btn"
+                                                    onClick={handleImportMenu}
+                                                    disabled={importLoading || !importUrl.trim()}
+                                                >
+                                                    {importLoading ? "⏳ Scanning website..." : "🔍 Extract Menu from URL"}
+                                                </button>
+                                                {importLoading && (
+                                                    <div className="extract-progress-hint">This may take 30–60 seconds depending on the website.</div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Image Mode */}
+                                        {extractMode === "image" && !importedMenu && (
+                                            <div className="extract-form">
+                                                <div className="extract-form-header">
+                                                    <button className="extract-back-btn" onClick={() => setExtractMode(null)}>← Back</button>
+                                                    <span className="extract-form-step">Step 1 of 2</span>
+                                                </div>
+                                                <h4>📸 Upload Menu Photo</h4>
+                                                <p className="extract-form-hint">Take a clear photo of the printed menu or capture a screenshot. Our AI will extract every item with prices.</p>
+                                                <div
+                                                    className={`extract-dropzone ${dragActive ? "active" : ""}`}
+                                                    onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+                                                    onDragLeave={() => setDragActive(false)}
+                                                    onDrop={(e) => {
+                                                        e.preventDefault();
+                                                        setDragActive(false);
+                                                        if (e.dataTransfer.files[0]) handleExtractFromFile(e.dataTransfer.files[0]);
+                                                    }}
+                                                    onClick={() => document.getElementById(`file-input-${r.id}`).click()}
+                                                >
+                                                    <input
+                                                        id={`file-input-${r.id}`}
+                                                        type="file"
+                                                        accept=".jpg,.jpeg,.png,.webp"
+                                                        style={{ display: 'none' }}
+                                                        onChange={(e) => { if (e.target.files[0]) handleExtractFromFile(e.target.files[0]); }}
+                                                    />
+                                                    {importLoading ? (
+                                                        <div className="extract-loading">
+                                                            <div className="extract-spinner"></div>
+                                                            <p>🧠 AI is analyzing your menu...</p>
+                                                            <p className="extract-loading-sub">This may take 15-30 seconds</p>
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            <div className="extract-dropzone-icon">📷</div>
+                                                            <p className="extract-dropzone-text">Drag & drop a menu photo here</p>
+                                                            <p className="extract-dropzone-sub">or tap to browse · JPG, PNG, WebP · Max 10MB</p>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Error */}
+                                        {importError && (
+                                            <div className="extract-error">
+                                                ❌ {importError}
+                                                <button onClick={() => setImportError("")}>✕</button>
+                                            </div>
+                                        )}
+
+                                        {/* Preview & Edit */}
+                                        {importedMenu && importedMenu.categories && (
+                                            <div className="extract-preview">
+                                                <div className="extract-preview-header">
+                                                    <h4>✅ Extracted Menu — Review & Edit</h4>
+                                                    <div style={{ display: 'flex', gap: 8 }}>
+                                                        <button className="extract-back-btn" onClick={() => { setImportedMenu(null); setExtractMode(null); setSaveStatus(""); }}>← New Extract</button>
+                                                    </div>
+                                                </div>
+                                                {importedMenu.restaurant_name && (
+                                                    <p className="extract-restaurant-name">📍 {importedMenu.restaurant_name}</p>
+                                                )}
+                                                <p className="extract-item-count">
+                                                    {importedMenu.categories.reduce((s, c) => s + (c.items?.length || 0), 0)} items in {importedMenu.categories.length} categories
+                                                </p>
+
+                                                {importedMenu.categories.map((cat, ci) => (
+                                                    <div key={ci} className="extract-category">
+                                                        <input
+                                                            className="extract-cat-name"
+                                                            value={cat.name}
+                                                            onChange={(e) => updateCategoryName(ci, e.target.value)}
+                                                        />
+                                                        {cat.items.map((item, ii) => (
+                                                            <div key={ii} className="extract-item-row">
+                                                                <input
+                                                                    className="extract-item-name"
+                                                                    value={item.name}
+                                                                    onChange={(e) => updateItem(ci, ii, "name", e.target.value)}
+                                                                    placeholder="Item name"
+                                                                />
+                                                                <input
+                                                                    className="extract-item-price"
+                                                                    type="number"
+                                                                    step="0.01"
+                                                                    value={item.price || 0}
+                                                                    onChange={(e) => updateItem(ci, ii, "price", e.target.value)}
+                                                                />
+                                                                <button className="extract-item-del" onClick={() => deleteItem(ci, ii)}>✕</button>
+                                                            </div>
+                                                        ))}
+                                                        <button className="extract-add-item" onClick={() => addItem(ci)}>+ Add Item</button>
+                                                    </div>
+                                                ))}
+                                                <button className="extract-add-cat" onClick={addCategory}>+ Add Category</button>
+
+                                                <button
+                                                    className="owner-primary-btn extract-save-btn"
+                                                    onClick={handleSaveMenu}
+                                                    disabled={saveStatus === "saving"}
+                                                >
+                                                    {saveStatus === "saving" ? "⏳ Saving..." : saveStatus === "saved" ? "✅ Saved!" : "💾 Save to Menu"}
+                                                </button>
+                                                {saveStatus === "error" && <p className="extract-error">Failed to save. Try again.</p>}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
