@@ -397,14 +397,14 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
     // --- Extract from image file ---
     async function handleExtractFromFile(file) {
         if (!file || !importRestId) return;
-        const allowed = [".jpg", ".jpeg", ".png", ".webp"];
+        const allowed = [".jpg", ".jpeg", ".png", ".webp", ".pdf", ".docx", ".doc", ".xlsx", ".xls"];
         const ext = "." + file.name.split(".").pop().toLowerCase();
         if (!allowed.includes(ext)) {
-            setImportError("Unsupported file type. Use JPG, PNG, or WebP.");
+            setImportError("Unsupported file type. Use JPG, PNG, WebP, PDF, DOCX, or XLSX.");
             return;
         }
-        if (file.size > 10 * 1024 * 1024) {
-            setImportError("File too large. Max 10MB.");
+        if (file.size > 20 * 1024 * 1024) {
+            setImportError("File too large. Max 20MB.");
             return;
         }
         setImportLoading(true);
@@ -936,11 +936,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                         <div className="extract-mode-desc">Upload menu image</div>
                                                         <div className="extract-mode-arrow">→</div>
                                                     </button>
-                                                    <button className="extract-mode-card extract-mode-disabled">
+                                                    <button className="extract-mode-card" onClick={() => { setExtractMode("document"); setImportedMenu(null); setImportError(""); }}>
                                                         <div className="extract-mode-icon">📄</div>
                                                         <div className="extract-mode-title">Document</div>
-                                                        <div className="extract-mode-desc">PDF / Excel — soon</div>
-                                                        <div className="extract-mode-badge">Coming Soon</div>
+                                                        <div className="extract-mode-desc">PDF, Word, or Excel</div>
+                                                        <div className="extract-mode-arrow">→</div>
                                                     </button>
                                                 </div>
                                             </>
@@ -1013,6 +1013,50 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                             <div className="extract-dropzone-icon">📷</div>
                                                             <p className="extract-dropzone-text">Drag & drop a menu photo here</p>
                                                             <p className="extract-dropzone-sub">or tap to browse · JPG, PNG, WebP · Max 10MB</p>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Document Mode */}
+                                        {extractMode === "document" && !importedMenu && (
+                                            <div className="extract-form">
+                                                <div className="extract-form-header">
+                                                    <button className="extract-back-btn" onClick={() => setExtractMode(null)}>← Back</button>
+                                                    <span className="extract-form-step">Step 1 of 2</span>
+                                                </div>
+                                                <h4>📄 Upload Menu Document</h4>
+                                                <p className="extract-form-hint">Upload a PDF, Word, or Excel file containing your menu. Our AI will extract all items and prices automatically.</p>
+                                                <div
+                                                    className={`extract-dropzone ${dragActive ? "active" : ""}`}
+                                                    onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+                                                    onDragLeave={() => setDragActive(false)}
+                                                    onDrop={(e) => {
+                                                        e.preventDefault();
+                                                        setDragActive(false);
+                                                        if (e.dataTransfer.files[0]) handleExtractFromFile(e.dataTransfer.files[0]);
+                                                    }}
+                                                    onClick={() => document.getElementById(`doc-input-${r.id}`).click()}
+                                                >
+                                                    <input
+                                                        id={`doc-input-${r.id}`}
+                                                        type="file"
+                                                        accept=".pdf,.docx,.doc,.xlsx,.xls"
+                                                        style={{ display: 'none' }}
+                                                        onChange={(e) => { if (e.target.files[0]) handleExtractFromFile(e.target.files[0]); }}
+                                                    />
+                                                    {importLoading ? (
+                                                        <div className="extract-loading">
+                                                            <div className="extract-spinner"></div>
+                                                            <p>🧠 AI is analyzing your document...</p>
+                                                            <p className="extract-loading-sub">Extracting text & parsing menu — 15-30 seconds</p>
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            <div className="extract-dropzone-icon">📁</div>
+                                                            <p className="extract-dropzone-text">Drag & drop a menu file here</p>
+                                                            <p className="extract-dropzone-sub">or tap to browse · PDF, DOCX, XLSX · Max 20MB</p>
                                                         </>
                                                     )}
                                                 </div>

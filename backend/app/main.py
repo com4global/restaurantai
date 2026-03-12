@@ -1207,6 +1207,8 @@ def get_me(current_user=Depends(get_current_user)):
 # =============================================================
 
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_DOC_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xls"}
+ALLOWED_ALL_EXTS = ALLOWED_IMAGE_EXTS | ALLOWED_DOC_EXTS
 
 
 @app.post("/owner/restaurants/{restaurant_id}/extract-menu-file")
@@ -1216,7 +1218,7 @@ async def extract_menu_from_file(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Upload an image of a menu and extract items using AI Vision."""
+    """Upload an image or document (PDF/DOCX/XLSX) and extract menu items using AI."""
     if current_user.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Not a restaurant owner")
 
@@ -1230,21 +1232,25 @@ async def extract_menu_from_file(
     # Validate file type
     import os
     ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in ALLOWED_IMAGE_EXTS:
+    if ext not in ALLOWED_ALL_EXTS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_IMAGE_EXTS)}"
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_ALL_EXTS)}"
         )
 
     # Read file bytes
-    image_bytes = await file.read()
-    if len(image_bytes) > 10 * 1024 * 1024:  # 10MB limit
-        raise HTTPException(status_code=400, detail="File too large. Max 10MB.")
+    file_bytes = await file.read()
+    if len(file_bytes) > 20 * 1024 * 1024:  # 20MB limit
+        raise HTTPException(status_code=400, detail="File too large. Max 20MB.")
 
-    # Extract menu
-    from .menu_extractor import extract_menu_from_image
+    # Route based on file type
     try:
-        menu_data = extract_menu_from_image(image_bytes, file.filename or "menu.jpg")
+        if ext in ALLOWED_IMAGE_EXTS:
+            from .menu_extractor import extract_menu_from_image
+            menu_data = extract_menu_from_image(file_bytes, file.filename or "menu.jpg")
+        else:
+            from .menu_extractor import extract_menu_from_document
+            menu_data = extract_menu_from_document(file_bytes, file.filename or "menu.pdf")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
