@@ -1754,7 +1754,8 @@ img {
   min-height: 100dvh;
   background: var(--bg-primary);
   color: var(--text-primary);
-  padding-bottom: 24px;
+  padding-top: env(safe-area-inset-top, 0);
+  padding-bottom: calc(24px + env(safe-area-inset-bottom, 0));
 }
 
 .owner-loading {
