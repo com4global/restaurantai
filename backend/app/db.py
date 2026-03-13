@@ -10,6 +10,10 @@ if settings.database_url.startswith("sqlite"):
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=not settings.database_url.startswith("sqlite"),
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=60,
+    pool_recycle=1800,
     connect_args=connect_args,
 )
 

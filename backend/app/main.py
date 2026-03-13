@@ -18,11 +18,13 @@ from .auth import create_access_token, get_current_user, verify_password
 from .config import settings
 from .db import get_db, engine
 from .voice import router as voice_router
+from .ai_dashboard import router as ai_dashboard_router
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="RestarentAI")
 app.include_router(voice_router)
+app.include_router(ai_dashboard_router)
 
 app.add_middleware(
     CORSMiddleware,
