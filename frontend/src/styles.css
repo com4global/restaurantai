@@ -1032,6 +1032,229 @@ img {
   color: var(--text-secondary);
 }
 
+/* ===== MEAL PLAN CARD (Redesigned) ===== */
+.mp-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: 8px;
+  animation: fadeInUp 0.5s ease;
+}
+
+.mp-header {
+  padding: 16px;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18), rgba(236, 72, 153, 0.14));
+  border-bottom: 1px solid var(--border);
+}
+
+.mp-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.mp-icon {
+  font-size: 1.4rem;
+}
+
+.mp-title {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.mp-stats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mp-stat {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.mp-stat.mp-saved {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--success);
+}
+
+.mp-days {
+  max-height: 350px;
+  overflow-y: auto;
+}
+
+.mp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  transition: var(--transition);
+}
+
+.mp-row:last-child {
+  border-bottom: none;
+}
+
+.mp-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mp-day-pill {
+  width: 42px;
+  height: 26px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.62rem;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.mp-meal-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.mp-meal-name {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+}
+
+.mp-meal-rest {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mp-meal-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.mp-meal-price {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--accent);
+  min-width: 48px;
+  text-align: right;
+}
+
+.mp-meal-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mp-btn-order {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 5px 12px;
+  border-radius: var(--radius-full);
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.mp-btn-order:hover {
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+
+.mp-btn-swap {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--transition);
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.mp-btn-swap:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: rotate(180deg);
+}
+
+.mp-footer {
+  padding: 14px 16px;
+  background: rgba(34, 197, 94, 0.05);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mp-footer-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mp-footer-total {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.mp-footer-savings {
+  font-size: 0.72rem;
+  color: var(--success);
+  font-weight: 600;
+}
+
+.mp-order-all {
+  background: linear-gradient(135deg, #f59e0b, #ec4899);
+  color: #fff;
+  border: none;
+  padding: 10px 22px;
+  border-radius: var(--radius-full);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.mp-order-all:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.3);
+}
+
 .user-bubble-row {
   display: flex;
   justify-content: flex-end;

@@ -263,3 +263,24 @@ class PriceComparisonResponse(BaseModel):
     query: str
     results: list[PriceComparisonItem]
     best_value: PriceComparisonItem | None = None
+
+
+# --- Meal Plan schemas ---
+
+class MealPlanDay(BaseModel):
+    day: str
+    item_id: int
+    item_name: str
+    restaurant_name: str
+    restaurant_id: int
+    price_cents: int
+    cuisine: str | None = None
+    description: str | None = None
+
+class MealPlanResponse(BaseModel):
+    days: list[MealPlanDay]
+    total_cents: int
+    budget_cents: int
+    savings_cents: int
+    people_count: int = 1
+    ai_summary: str | None = None

@@ -654,6 +654,194 @@ def _build_display_query(intent) -> str:
     return " · ".join(parts) if parts else ""
 
 
+# ─── Meal Plan Endpoints ──────────────────────────────────────────────────
+
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+class MealPlanRequest(BaseModel):
+    text: str
+
+
+@app.post("/mealplan/generate", response_model=schemas.MealPlanResponse)
+def generate_meal_plan(req: MealPlanRequest, db: Session = Depends(get_db)):
+    """Generate a diverse weekly meal plan within budget using the Diversity Engine."""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "Text is required")
+
+    intent = intent_extractor.extract_intent(text, use_llm=False)
+
+    plan_days = intent.plan_days or 5
+    people = intent.people_count or 1
+    budget_cents = int((intent.budget_total or intent.price_max or 100) * 100)
+    per_meal_cents = budget_cents // plan_days
+
+    # Query all available items (real meals only, min $5)
+    EXCLUDE_KEYWORDS = {"water", "soda", "coke", "pepsi", "sprite", "fanta", "juice",
+                         "naan", "pav", "rice", "roti", "bread", "raita", "sauce",
+                         "extra", "add-on", "utensil", "cutlery", "napkin"}
+    min_price = 500  # $5.00 minimum for actual meals
+    rows = (
+        db.query(models.MenuItem, models.Restaurant)
+        .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+        .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+        .filter(models.MenuItem.is_available.is_(True))
+        .filter(models.Restaurant.is_active.is_(True))
+        .filter(models.MenuItem.price_cents >= min_price)
+        .filter(models.MenuItem.price_cents <= per_meal_cents)
+        .all()
+    )
+    # Filter out beverages/sides by name
+    rows = [(i, r) for i, r in rows if not any(kw in i.name.lower() for kw in EXCLUDE_KEYWORDS)]
+    # Shuffle for variety instead of cheapest-first
+    import random
+    random.shuffle(rows)
+
+    # Apply cuisine / diet / protein filters from intent
+    rows = _filter_rows(rows, intent)
+
+    if not rows:
+        # Fallback: relax price filter
+        rows = (
+            db.query(models.MenuItem, models.Restaurant)
+            .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+            .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+            .filter(models.MenuItem.is_available.is_(True))
+            .filter(models.Restaurant.is_active.is_(True))
+            .filter(models.MenuItem.price_cents > 0)
+            .filter(models.MenuItem.price_cents <= 3000)
+            .order_by(models.MenuItem.price_cents.asc())
+            .all()
+        )
+
+    # ── Diversity Engine ─────────────────────────────────────
+    # Rules: max 2 same cuisine, max 2 same restaurant, no repeat dishes
+    MAX_SAME_CUISINE = 2
+    MAX_SAME_RESTAURANT = 2
+
+    cuisine_count: dict[str, int] = {}
+    restaurant_count: dict[int, int] = {}
+    used_items: set[int] = set()
+    plan_days_list: list[schemas.MealPlanDay] = []
+    total_cents = 0
+
+    for day_idx in range(plan_days):
+        best_pick = None
+        for item, restaurant in rows:
+            if item.id in used_items:
+                continue
+
+            item_cuisine = (item.cuisine or restaurant.name or "other").lower()
+            r_id = restaurant.id
+
+            # Check diversity constraints
+            if cuisine_count.get(item_cuisine, 0) >= MAX_SAME_CUISINE:
+                continue
+            if restaurant_count.get(r_id, 0) >= MAX_SAME_RESTAURANT:
+                continue
+
+            # Check budget
+            if total_cents + item.price_cents > budget_cents:
+                continue
+
+            best_pick = (item, restaurant, item_cuisine)
+            break
+
+        if not best_pick:
+            # Relax constraints: allow any item that fits budget
+            for item, restaurant in rows:
+                if item.id in used_items:
+                    continue
+                if total_cents + item.price_cents <= budget_cents:
+                    item_cuisine = (item.cuisine or restaurant.name or "other").lower()
+                    best_pick = (item, restaurant, item_cuisine)
+                    break
+
+        if best_pick:
+            item, restaurant, item_cuisine = best_pick
+            used_items.add(item.id)
+            cuisine_count[item_cuisine] = cuisine_count.get(item_cuisine, 0) + 1
+            restaurant_count[restaurant.id] = restaurant_count.get(restaurant.id, 0) + 1
+            total_cents += item.price_cents
+
+            plan_days_list.append(schemas.MealPlanDay(
+                day=DAY_NAMES[day_idx % 7],
+                item_id=item.id,
+                item_name=item.name,
+                restaurant_name=restaurant.name,
+                restaurant_id=restaurant.id,
+                price_cents=item.price_cents,
+                cuisine=item.cuisine or None,
+                description=item.description or None,
+            ))
+
+    savings = budget_cents - total_cents
+
+    # ── AI Summary ────────────────────────────────────────────
+    cuisines_used = list(set(d.cuisine or d.restaurant_name for d in plan_days_list))
+    restaurants_used = list(set(d.restaurant_name for d in plan_days_list))
+    summary = (
+        f"🍽️ Your {len(plan_days_list)}-day meal plan is ready! "
+        f"Total cost: ${total_cents / 100:.2f} "
+        f"(${savings / 100:.2f} under your ${budget_cents / 100:.0f} budget). "
+        f"Includes dishes from {', '.join(restaurants_used[:3])}{'...' if len(restaurants_used) > 3 else ''}"
+        f" across {len(cuisines_used)} {'cuisine' if len(cuisines_used) == 1 else 'cuisines'}."
+    )
+
+    return schemas.MealPlanResponse(
+        days=plan_days_list,
+        total_cents=total_cents,
+        budget_cents=budget_cents,
+        savings_cents=savings,
+        people_count=people,
+        ai_summary=summary,
+    )
+
+
+class MealSwapRequest(BaseModel):
+    text: str
+    day_index: int
+    current_item_id: int
+    budget_remaining_cents: int
+
+
+@app.post("/mealplan/swap", response_model=schemas.MealPlanDay)
+def swap_meal(req: MealSwapRequest, db: Session = Depends(get_db)):
+    """Swap a single meal in the plan with a different diverse option."""
+    rows = (
+        db.query(models.MenuItem, models.Restaurant)
+        .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+        .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+        .filter(models.MenuItem.is_available.is_(True))
+        .filter(models.Restaurant.is_active.is_(True))
+        .filter(models.MenuItem.price_cents > 0)
+        .filter(models.MenuItem.price_cents <= req.budget_remaining_cents)
+        .filter(models.MenuItem.id != req.current_item_id)
+        .order_by(models.MenuItem.price_cents.asc())
+        .all()
+    )
+
+    if not rows:
+        raise HTTPException(404, "No alternative meals found within budget")
+
+    # Pick a random different item for variety
+    import random
+    pick_pool = rows[:min(20, len(rows))]
+    item, restaurant = random.choice(pick_pool)
+
+    return schemas.MealPlanDay(
+        day=DAY_NAMES[req.day_index % 7],
+        item_id=item.id,
+        item_name=item.name,
+        restaurant_name=restaurant.name,
+        restaurant_id=restaurant.id,
+        price_cents=item.price_cents,
+        cuisine=item.cuisine or None,
+        description=item.description or None,
+    )
+
+
 def restaurant_categories(restaurant_id: int, db: Session = Depends(get_db)):
     return crud.list_categories(db, restaurant_id)
 

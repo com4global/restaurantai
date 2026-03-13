@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
@@ -523,6 +523,31 @@ export default function App() {
     // matching items. Handles everything: "pizza", "cheap Indian food",
     // "i dont know what to eat", "feed 5 people under $50", etc.
     const skipIntentSearch = trimmed.startsWith("#") || trimmed.startsWith("add:") || trimmed.length <= 2;
+
+    // ── Meal Plan Detection ─────────────────────────────────────────────
+    const mealPlanRegex = /(?:plan|create|make|generate|build)\s+(?:my\s+)?(?:meal|food|dinner|lunch)s?|(?:weekly|daily|\d+\s*day)\s+(?:meal|food|dinner|lunch)\s*plan|meal\s*plan/i;
+    if (!selectedRestaurant && !skipIntentSearch && mealPlanRegex.test(trimmed)) {
+      try {
+        const data = await generateMealPlan(trimmed);
+        if (data.days && data.days.length > 0) {
+          setMessages((p) => [...p, {
+            role: "bot",
+            content: `__MEAL_PLAN__`,
+            mealPlan: data,
+          }]);
+          setStatus("Ready.");
+          return;
+        }
+      } catch (err) {
+        setMessages((p) => [...p, {
+          role: "bot",
+          content: "Sorry, I had trouble generating a meal plan. Try: \"plan meals for the week under $100\"",
+        }]);
+        setStatus("Ready.");
+        return;
+      }
+    }
+
     if (!selectedRestaurant && !skipIntentSearch) {
       try {
         const data = await searchByIntent(trimmed);
@@ -1057,6 +1082,120 @@ export default function App() {
                             ))}
                           </div>
                           {best_value && <div className="compare-footer">🏆 Best Value: <b>{best_value.restaurant_name}</b> — ${(best_value.price_cents / 100).toFixed(2)}</div>}
+                        </div>
+                      );
+                    }
+                    // Meal Plan Card
+                    if (lastBot.mealPlan) {
+                      const plan = lastBot.mealPlan;
+                      const DAY_SHORT = { Monday: "MON", Tuesday: "TUE", Wednesday: "WED", Thursday: "THU", Friday: "FRI", Saturday: "SAT", Sunday: "SUN" };
+                      const DAY_COLORS = ["#f59e0b", "#8b5cf6", "#3b82f6", "#ec4899", "#22c55e", "#06b6d4", "#ef4444"];
+                      return (
+                        <div className="mp-card">
+                          {/* Header */}
+                          <div className="mp-header">
+                            <div className="mp-title-row">
+                              <span className="mp-icon">🍽️</span>
+                              <span className="mp-title">Your {plan.days.length}-Day Meal Plan</span>
+                            </div>
+                            <div className="mp-stats">
+                              <span className="mp-stat">💰 ${(plan.total_cents / 100).toFixed(2)}</span>
+                              <span className="mp-stat mp-saved">✅ ${(plan.savings_cents / 100).toFixed(2)} saved</span>
+                              <span className="mp-stat">{new Set(plan.days.map(d => d.restaurant_name)).size} restaurants</span>
+                            </div>
+                          </div>
+
+                          {/* Days */}
+                          <div className="mp-days">
+                            {plan.days.map((d, i) => (
+                              <div key={i} className="mp-row">
+                                <div className="mp-day-pill" style={{ background: DAY_COLORS[i % 7] }}>
+                                  {DAY_SHORT[d.day] || d.day.slice(0, 3).toUpperCase()}
+                                </div>
+                                <div className="mp-meal-info">
+                                  <div className="mp-meal-name">{d.item_name}</div>
+                                  <div className="mp-meal-rest">{d.restaurant_name}</div>
+                                </div>
+                                <div className="mp-meal-right">
+                                  <div className="mp-meal-price">${(d.price_cents / 100).toFixed(2)}</div>
+                                  <div className="mp-meal-btns">
+                                    <button className="mp-btn-order" onClick={async (e) => {
+                                      const btn = e.currentTarget;
+                                      if (!token) { setStatus("Please log in to order"); return; }
+                                      try {
+                                        btn.textContent = "…";
+                                        await addComboToCart(token, d.restaurant_id, [{ item_id: d.item_id, quantity: 1 }]);
+                                        const cartRes = await fetchCart(token);
+                                        setCartData(cartRes);
+                                        btn.textContent = "✓";
+                                        btn.style.background = "var(--success)";
+                                        setTimeout(() => { btn.textContent = "Order"; btn.style.background = ""; }, 1500);
+                                      } catch (err) {
+                                        btn.textContent = "Order";
+                                        setStatus(err.message || "Failed");
+                                      }
+                                    }}>Order</button>
+                                    <button className="mp-btn-swap" onClick={async (e) => {
+                                      const btn = e.currentTarget;
+                                      try {
+                                        btn.textContent = "…";
+                                        const newMeal = await swapMeal({
+                                          text: "",
+                                          day_index: i,
+                                          current_item_id: d.item_id,
+                                          budget_remaining_cents: plan.savings_cents + d.price_cents,
+                                        });
+                                        setMessages((prev) => prev.map((msg) => {
+                                          if (msg.mealPlan) {
+                                            const newDays = [...msg.mealPlan.days];
+                                            const oldPrice = newDays[i].price_cents;
+                                            newDays[i] = newMeal;
+                                            const newTotal = msg.mealPlan.total_cents - oldPrice + newMeal.price_cents;
+                                            return {
+                                              ...msg,
+                                              mealPlan: { ...msg.mealPlan, days: newDays, total_cents: newTotal, savings_cents: msg.mealPlan.budget_cents - newTotal },
+                                            };
+                                          }
+                                          return msg;
+                                        }));
+                                        btn.textContent = "🔄";
+                                        setTimeout(() => { btn.textContent = "↻"; }, 1000);
+                                      } catch (err) {
+                                        btn.textContent = "↻";
+                                        setStatus(err.message || "No alternatives");
+                                      }
+                                    }}>↻</button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Footer */}
+                          <div className="mp-footer">
+                            <div className="mp-footer-left">
+                              <div className="mp-footer-total">${(plan.total_cents / 100).toFixed(2)}</div>
+                              <div className="mp-footer-savings">You saved ${(plan.savings_cents / 100).toFixed(2)} ✨</div>
+                            </div>
+                            <button className="mp-order-all" onClick={async (e) => {
+                              const btn = e.currentTarget;
+                              if (!token) { setStatus("Please log in to order"); return; }
+                              try {
+                                btn.textContent = "Ordering…";
+                                for (const d of plan.days) {
+                                  await addComboToCart(token, d.restaurant_id, [{ item_id: d.item_id, quantity: 1 }]);
+                                }
+                                const cartRes = await fetchCart(token);
+                                setCartData(cartRes);
+                                btn.textContent = "✓ All Added";
+                                btn.style.background = "var(--success)";
+                                setTimeout(() => { btn.textContent = "Order Full Plan"; btn.style.background = ""; }, 2000);
+                              } catch (err) {
+                                btn.textContent = "Order Full Plan";
+                                setStatus(err.message || "Failed");
+                              }
+                            }}>Order Full Plan</button>
+                          </div>
                         </div>
                       );
                     }

@@ -599,6 +599,90 @@ class TestMultiIntent:
         assert r.cuisine == "Italian"
         assert r.diet_type == "gluten-free"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🍽 MEAL PLANNER (15 tests)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMealPlanner:
+    def test_plan_meals_week(self):
+        r = intent("Plan my meals for the week under $120")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 5
+        assert r.price_max == 120 or r.budget_total == 120
+
+    def test_weekly_meal_plan(self):
+        r = intent("Weekly meal plan under $80")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 5
+        assert r.price_max == 80
+
+    def test_5_day_meal_plan(self):
+        r = intent("5 day meal plan")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 5
+
+    def test_3_day_plan(self):
+        r = intent("3 day meal plan under $50")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 3
+        assert r.price_max == 50
+
+    def test_full_week(self):
+        r = intent("Create meal plan for full week")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 7
+
+    def test_plan_meals_for_week(self):
+        r = intent("plan meals for this week")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 5
+
+    def test_weekly_dinner_plan(self):
+        r = intent("weekly dinner plan under $80")
+        assert r.meal_plan_mode is True
+        assert r.meal_type == "dinner"
+
+    def test_healthy_lunch_plan(self):
+        r = intent("healthy lunch plan for 5 days")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 5
+        assert r.diet_type == "healthy"
+
+    def test_vegetarian_plan(self):
+        r = intent("vegetarian meal plan for 3 days")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 3
+        assert r.diet_type == "vegetarian"
+
+    def test_create_food_plan(self):
+        r = intent("create my food plan for the week")
+        assert r.meal_plan_mode is True
+
+    def test_generate_meal_plan(self):
+        r = intent("generate meal plan budget $100")
+        assert r.meal_plan_mode is True
+        assert r.price_max == 100
+
+    def test_build_meal_plan(self):
+        r = intent("build a meal plan for 4 days")
+        assert r.meal_plan_mode is True
+        assert r.plan_days == 4
+
+    def test_make_food_plan(self):
+        r = intent("make a food plan under $60")
+        assert r.meal_plan_mode is True
+        assert r.price_max == 60
+
+    def test_daily_meal_plan(self):
+        r = intent("daily meal plan under $20")
+        assert r.meal_plan_mode is True
+        assert r.price_max == 20
+
+    def test_plan_meals_has_variety(self):
+        r = intent("plan my meals for the week")
+        assert r.meal_plan_mode is True
+        assert r.variety_required is True
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Run

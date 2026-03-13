@@ -40,6 +40,9 @@ class FoodIntent:
     occasion: Optional[str] = None
     location: Optional[str] = None
     recommendation_mode: Optional[bool] = None
+    meal_plan_mode: Optional[bool] = None
+    plan_days: Optional[int] = None
+    variety_required: Optional[bool] = None
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -51,6 +54,7 @@ class FoodIntent:
             self.diet_type, self.price_max, self.budget_total,
             self.people_count, self.recommendation_mode,
             self.rating_min, self.spice_level, self.occasion,
+            self.meal_plan_mode,
         ])
 
 
@@ -162,6 +166,33 @@ def extract_intent_local(text: str) -> FoodIntent:
     # Strip apostrophes so "I'm" → "im", "don't" → "dont"
     lower = text.lower().strip()
     lower = re.sub(r"[''`]", "", lower)
+
+    # 0. Detect meal plan mode FIRST (before other extraction)
+    meal_plan_patterns = [
+        r'(?:plan|create|make|generate|build)\s+(?:my\s+|a\s+)?(?:meal|food|dinner|lunch)s?\s*(?:plan)?(?:\s+for)?',
+        r'(?:weekly|daily|\d+\s*day)\s+(?:meal|food|dinner|lunch)\s*plan',
+        r'meal\s*plan(?:ner)?',
+        r'plan\s+(?:my\s+)?(?:meals|food|eating)',
+        r'(?:healthy|vegetarian|vegan|keto)\s+(?:meal|food|dinner|lunch)\s*plan',
+        r'(?:dinner|lunch|breakfast|food)\s+plan',
+    ]
+    for pat in meal_plan_patterns:
+        if re.search(pat, lower):
+            intent.meal_plan_mode = True
+            intent.variety_required = True
+            break
+
+    # Extract plan days
+    if intent.meal_plan_mode:
+        days_match = re.search(r'(\d+)\s*days?', lower)
+        if days_match:
+            intent.plan_days = int(days_match.group(1))
+        elif 'full week' in lower:
+            intent.plan_days = 7
+        elif 'week' in lower or 'weekday' in lower:
+            intent.plan_days = 5
+        else:
+            intent.plan_days = 5  # default
 
     # 1. Discovery / recommendation mode
     for kw in _DISCOVERY_KEYWORDS:

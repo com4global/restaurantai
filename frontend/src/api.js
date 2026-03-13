@@ -66,6 +66,22 @@ export async function searchByIntent(text) {
   });
 }
 
+export async function generateMealPlan(text) {
+  return request(`/mealplan/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function swapMeal({ text, day_index, current_item_id, budget_remaining_cents }) {
+  return request(`/mealplan/swap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, day_index, current_item_id, budget_remaining_cents }),
+  });
+}
+
 export async function fetchNearby({ lat, lng, radius_miles } = {}) {
   const params = new URLSearchParams();
   if (lat != null) params.set("lat", lat);
