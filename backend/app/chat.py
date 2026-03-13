@@ -206,21 +206,85 @@ def _find_best_restaurant(name: str, all_restaurants) -> object | None:
     return best if best_score >= 0.5 else None
 
 
+# Stop words shared with /search/menu-items in main.py
+_CHAT_STOP_WORDS = {
+    "i", "a", "an", "the", "is", "am", "are", "was", "were", "be", "been",
+    "do", "does", "did", "have", "has", "had", "will", "would", "can",
+    "could", "should", "may", "might", "shall", "to", "of", "in", "on",
+    "at", "for", "with", "from", "by", "it", "its", "my", "me", "we",
+    "us", "you", "your", "he", "she", "they", "them", "this", "that",
+    "want", "need", "get", "find", "buy", "give", "show", "where",
+    "what", "which", "how", "much", "many", "some", "any", "all",
+    "please", "just", "like", "also", "very", "really", "about",
+    "nearby", "near", "here", "around", "cheapest", "cheap", "compare",
+    "price", "best", "value", "lowest",
+}
+
+
+def _edit_distance_chat(a: str, b: str) -> int:
+    """Simple Levenshtein distance for fuzzy matching."""
+    if len(a) < len(b):
+        return _edit_distance_chat(b, a)
+    if len(b) == 0:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if ca == cb else 1)))
+        prev = curr
+    return prev[len(b)]
+
+
+def _fuzzy_match_chat(keyword: str, text: str) -> bool:
+    """Check if keyword appears in text — exact substring OR fuzzy (edit distance ≤ threshold)."""
+    if keyword in text:
+        return True
+    for word in text.split():
+        word_clean = word.strip("(),.-!?").lower()
+        if len(keyword) >= 3 and len(word_clean) >= 3:
+            threshold = 1 if len(keyword) <= 5 else 2
+            if _edit_distance_chat(keyword, word_clean) <= threshold:
+                return True
+    return False
+
+
 def _search_items_across_restaurants(db: Session, query: str, restaurants, limit=5):
-    """Search for items across all restaurants."""
-    query_lower = query.lower().strip()
+    """Search for items across all restaurants.
+
+    Quality rules (matching /search/menu-items):
+    1. Strip stop words from the query
+    2. Exclude $0 items
+    3. Require ALL keywords to match (exact or fuzzy)
+    4. Sort by price ascending (cheapest first)
+    """
+    raw_keywords = query.lower().strip().split()
+    keywords = [kw for kw in raw_keywords if kw not in _CHAT_STOP_WORDS and len(kw) >= 2]
+
+    # Fallback: if all words were stop words, use the longest raw keyword
+    if not keywords:
+        keywords = sorted(raw_keywords, key=len, reverse=True)[:1]
+    if not keywords:
+        return []
+
     results = []
     for rest in restaurants:
         all_items = _get_all_restaurant_items(db, rest.id)
         for item in all_items:
-            score = _similarity(query_lower, item.name.lower())
-            if query_lower in item.name.lower():
-                score = max(score, 0.8)
-            for word in item.name.lower().split():
-                score = max(score, _similarity(query_lower, word))
-            if score >= 0.4:
+            # Exclude $0 items
+            if item.price_cents <= 0:
+                continue
+            item_name_lower = item.name.lower()
+            # Require ALL keywords to match (exact or fuzzy)
+            matched = sum(1 for kw in keywords if _fuzzy_match_chat(kw, item_name_lower))
+            if matched == len(keywords):
+                # Bonus for exact substring matches
+                exact_bonus = sum(1 for kw in keywords if kw in item_name_lower)
+                score = matched + exact_bonus
                 results.append((item, rest, score))
-    results.sort(key=lambda x: x[2], reverse=True)
+
+    # Sort by match score DESC, then price ASC (cheapest first)
+    results.sort(key=lambda x: (-x[2], x[0].price_cents))
     return results[:limit]
 
 
@@ -678,7 +742,11 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
         if all_restaurants and len(cleaned) > 2:
             cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
             if cross_results:
-                lines = [f'Found "{cleaned}" at these restaurants:\n']
+                # Extract meaningful keywords for display
+                raw_kws = cleaned.lower().split()
+                display_kws = [kw for kw in raw_kws if kw not in _CHAT_STOP_WORDS and len(kw) >= 2]
+                display_query = " ".join(display_kws) if display_kws else cleaned
+                lines = [f'Found "{display_query}" at these restaurants:\n']
                 seen = set()
                 rest_names = []
                 for item, rest, score in cross_results:

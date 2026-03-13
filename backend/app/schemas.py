@@ -245,3 +245,21 @@ class MealOptimizerResponse(BaseModel):
     combos: list[MealCombo]
     people_requested: int
     budget_cents: int
+
+
+# --- Price Comparison schemas ---
+
+class PriceComparisonItem(BaseModel):
+    item_id: int
+    item_name: str
+    price_cents: int
+    restaurant_name: str
+    restaurant_id: int
+    city: str | None = None
+    rating: float | None = None
+    description: str | None = None
+
+class PriceComparisonResponse(BaseModel):
+    query: str
+    results: list[PriceComparisonItem]
+    best_value: PriceComparisonItem | None = None

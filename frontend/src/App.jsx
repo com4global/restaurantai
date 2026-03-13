@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
@@ -513,8 +513,47 @@ export default function App() {
 
   const doSend = async (text, fromVoice = false) => {
     if (!text.trim()) return;
-    setMessages((p) => [...p, { role: "user", content: text.trim() }]);
+    const trimmed = text.trim();
+    setMessages((p) => [...p, { role: "user", content: trimmed }]);
     setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
+
+    // ── Smart Intent-Based Search ────────────────────────────────────
+    // When no restaurant is selected, send ANY input to the intent engine.
+    // The backend extracts dish name, cuisine, diet, budget, etc. and returns
+    // matching items. Handles everything: "pizza", "cheap Indian food",
+    // "i dont know what to eat", "feed 5 people under $50", etc.
+    const skipIntentSearch = trimmed.startsWith("#") || trimmed.startsWith("add:") || trimmed.length <= 2;
+    if (!selectedRestaurant && !skipIntentSearch) {
+      try {
+        const data = await searchByIntent(trimmed);
+        if (data.results && data.results.length > 0) {
+          setMessages((p) => [...p, {
+            role: "bot",
+            content: `__PRICE_COMPARE__`,
+            priceCompare: data,
+          }]);
+          setStatus("Ready.");
+          return;
+        }
+      } catch (err) { /* fall through to normal chat */ }
+    }
+
+    // If restaurant IS selected, allow explicit price comparison keywords
+    if (selectedRestaurant && /cheapest|cheap|compare|price|best\s+value|lowest/i.test(trimmed)) {
+      try {
+        const data = await searchByIntent(trimmed);
+        if (data.results && data.results.length > 0) {
+          setMessages((p) => [...p, {
+            role: "bot",
+            content: `__PRICE_COMPARE__`,
+            priceCompare: data,
+          }]);
+          setStatus("Ready.");
+          return;
+        }
+      } catch (err) { /* fall through to normal chat */ }
+    }
+
     try {
       const res = await sendMessage(token, { session_id: sessionId, text: text.trim() });
       setSessionId(res.session_id);
@@ -964,12 +1003,54 @@ export default function App() {
                   {/* Show latest bot message */}
                   {messages.length > 0 && (() => {
                     const lastBot = [...messages].reverse().find(m => m.role === "bot");
-                    return lastBot ? (
+                    if (!lastBot) return null;
+                    // Price Comparison Card
+                    if (lastBot.priceCompare) {
+                      const { query, results, best_value } = lastBot.priceCompare;
+                      return (
+                        <div className="price-compare-card">
+                          <div className="compare-header">
+                            <span className="compare-icon">🔍</span>
+                            <span className="compare-title">Price Comparison: <b>{query}</b></span>
+                          </div>
+                          <div className="compare-results">
+                            {results.slice(0, 8).map((r, i) => (
+                              <div key={i} className={`compare-row ${best_value && r.price_cents === best_value.price_cents && r.restaurant_name === best_value.restaurant_name ? 'best-value' : ''}`}>
+                                <div className="compare-rank">{i === 0 ? '🏆' : `#${i + 1}`}</div>
+                                <div className="compare-info">
+                                  <div className="compare-item-name">{r.item_name}</div>
+                                  <div className="compare-restaurant">{r.restaurant_name}{r.city ? ` · ${r.city}` : ''}{r.rating ? ` ⭐${r.rating}` : ''}</div>
+                                </div>
+                                <div className="compare-price">${(r.price_cents / 100).toFixed(2)}</div>
+                                <button className="compare-order-btn" onClick={async (e) => {
+                                  const btn = e.currentTarget;
+                                  if (!token) { setStatus("Please log in to order"); return; }
+                                  try {
+                                    btn.textContent = "…";
+                                    await addComboToCart(token, r.restaurant_id, [{ item_id: r.item_id, quantity: 1 }]);
+                                    const cartRes = await fetchCart(token);
+                                    setCartData(cartRes);
+                                    btn.textContent = "✓ Added";
+                                    btn.style.background = "var(--success)";
+                                    setTimeout(() => { btn.textContent = "Order"; btn.style.background = ""; }, 1500);
+                                  } catch (err) {
+                                    btn.textContent = "Order";
+                                    setStatus(err.message || "Failed to add");
+                                  }
+                                }}>Order</button>
+                              </div>
+                            ))}
+                          </div>
+                          {best_value && <div className="compare-footer">🏆 Best Value: <b>{best_value.restaurant_name}</b> — ${(best_value.price_cents / 100).toFixed(2)}</div>}
+                        </div>
+                      );
+                    }
+                    return (
                       <div className="ai-message">
                         <div className="ai-avatar">✨</div>
                         <div className="ai-bubble">{renderContent(lastBot.content)}</div>
                       </div>
-                    ) : null;
+                    );
                   })()}
 
                   {/* Compact voice status bar (non-blocking) */}

@@ -50,6 +50,22 @@ export async function listRestaurants({ lat, lng, radius_miles } = {}) {
   return request(`/restaurants${qs ? "?" + qs : ""}`);
 }
 
+export async function searchMenuItems(query) {
+  return request(`/search/menu-items?q=${encodeURIComponent(query)}`);
+}
+
+export async function fetchPopularItems() {
+  return request(`/search/popular`);
+}
+
+export async function searchByIntent(text) {
+  return request(`/search/intent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+}
+
 export async function fetchNearby({ lat, lng, radius_miles } = {}) {
   const params = new URLSearchParams();
   if (lat != null) params.set("lat", lat);

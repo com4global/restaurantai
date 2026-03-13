@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from . import chat, crud, models, optimizer, payments, schemas
+from . import chat, crud, intent_extractor, models, optimizer, payments, schemas
 from .auth import create_access_token, get_current_user, verify_password
 from .config import settings
 from .db import get_db, engine
@@ -294,7 +294,340 @@ def restaurants(
     return all_restaurants
 
 
-@app.get("/restaurants/{restaurant_id}/categories", response_model=list[schemas.MenuCategoryOut])
+# ── Cross-Restaurant Price Comparison ─────────────────────────────────
+
+_STOP_WORDS = {
+    "i", "a", "an", "the", "is", "am", "are", "was", "were", "be", "been",
+    "do", "does", "did", "have", "has", "had", "will", "would", "can",
+    "could", "should", "may", "might", "shall", "to", "of", "in", "on",
+    "at", "for", "with", "from", "by", "it", "its", "my", "me", "we",
+    "us", "you", "your", "he", "she", "they", "them", "this", "that",
+    "want", "need", "get", "find", "buy", "give", "show", "where",
+    "what", "which", "how", "much", "many", "some", "any", "all",
+    "please", "just", "like", "also", "very", "really", "about",
+    "nearby", "near", "here", "around", "cheapest", "cheap", "compare",
+    "price", "best", "value", "lowest",
+}
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Simple Levenshtein distance for fuzzy matching."""
+    if len(a) < len(b):
+        return _edit_distance(b, a)
+    if len(b) == 0:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        curr = [i + 1]
+        for j, cb in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if ca == cb else 1)))
+        prev = curr
+    return prev[len(b)]
+
+
+def _fuzzy_match(keyword: str, text: str) -> bool:
+    """Check if keyword appears in text — exact substring OR fuzzy (edit distance ≤ 2)."""
+    if keyword in text:
+        return True
+    # Check each word in text for fuzzy match
+    for word in text.split():
+        word_clean = word.strip("(),.-!?")
+        if len(keyword) >= 3 and len(word_clean) >= 3:
+            threshold = 1 if len(keyword) <= 5 else 2
+            if _edit_distance(keyword, word_clean) <= threshold:
+                return True
+    return False
+
+
+@app.get("/search/menu-items", response_model=schemas.PriceComparisonResponse)
+def search_menu_items(q: str = "", db: Session = Depends(get_db)):
+    """Search for a menu item across ALL restaurants — sorted cheapest first."""
+    query = q.strip()
+    if not query or len(query) < 2:
+        raise HTTPException(400, "Search query must be at least 2 characters")
+
+    # Extract meaningful keywords (remove stop words)
+    raw_keywords = query.lower().split()
+    keywords = [kw for kw in raw_keywords if kw not in _STOP_WORDS and len(kw) >= 2]
+
+    # If all words were stop words, use the longest raw keyword as fallback
+    if not keywords:
+        keywords = sorted(raw_keywords, key=len, reverse=True)[:1]
+    if not keywords:
+        raise HTTPException(400, "Search query must contain meaningful words")
+
+    # Join MenuItem → MenuCategory → Restaurant
+    rows = (
+        db.query(models.MenuItem, models.Restaurant)
+        .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+        .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+        .filter(models.MenuItem.is_available.is_(True))
+        .filter(models.Restaurant.is_active.is_(True))
+        .filter(models.MenuItem.price_cents > 0)  # Exclude $0 items
+        .all()
+    )
+
+    # Score each item — require ALL keywords to match (exact or fuzzy)
+    scored = []
+    for item, restaurant in rows:
+        item_name_lower = item.name.lower()
+        matched = sum(1 for kw in keywords if _fuzzy_match(kw, item_name_lower))
+        if matched == len(keywords):  # ALL keywords must match
+            # Bonus: exact substring match scores higher
+            exact_bonus = sum(1 for kw in keywords if kw in item_name_lower)
+            scored.append((matched + exact_bonus, item, restaurant))
+
+    # Sort by match score DESC, then price ASC
+    scored.sort(key=lambda x: (-x[0], x[1].price_cents))
+
+    results = []
+    for _score, item, restaurant in scored:
+        results.append(schemas.PriceComparisonItem(
+            item_id=item.id,
+            item_name=item.name,
+            price_cents=item.price_cents,
+            restaurant_name=restaurant.name,
+            restaurant_id=restaurant.id,
+            city=restaurant.city,
+            rating=restaurant.rating,
+            description=item.description,
+        ))
+
+    best_value = results[0] if results else None
+
+    return schemas.PriceComparisonResponse(
+        query=query,
+        results=results,
+        best_value=best_value,
+    )
+
+
+@app.get("/search/popular", response_model=schemas.PriceComparisonResponse)
+def popular_items(db: Session = Depends(get_db)):
+    """Return a diverse selection of popular food items across all restaurants.
+
+    Used for discovery queries like 'i dont know what to eat'.
+    Filters out drinks/sides (items under $5) and returns 1 item per restaurant,
+    sorted by price ascending, max 10 items.
+    """
+    # All available food items (price >= $5 to skip drinks/sides/extras)
+    rows = (
+        db.query(models.MenuItem, models.Restaurant)
+        .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+        .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+        .filter(models.MenuItem.is_available.is_(True))
+        .filter(models.Restaurant.is_active.is_(True))
+        .filter(models.MenuItem.price_cents >= 500)   # $5+ = real food items
+        .filter(models.MenuItem.price_cents <= 3000)   # Under $30 = reasonable
+        .order_by(models.MenuItem.price_cents.asc())
+        .all()
+    )
+
+    # Pick 1 item per restaurant for maximum diversity
+    seen_restaurants: set[int] = set()
+    results = []
+    for item, restaurant in rows:
+        if restaurant.id in seen_restaurants:
+            continue
+        seen_restaurants.add(restaurant.id)
+        results.append(schemas.PriceComparisonItem(
+            item_id=item.id,
+            item_name=item.name,
+            price_cents=item.price_cents,
+            restaurant_name=restaurant.name,
+            restaurant_id=restaurant.id,
+            city=restaurant.city,
+            rating=restaurant.rating,
+            description=item.description,
+        ))
+        if len(results) >= 10:
+            break
+
+    best_value = results[0] if results else None
+    return schemas.PriceComparisonResponse(
+        query="Popular picks for you",
+        results=results,
+        best_value=best_value,
+    )
+
+
+class IntentSearchRequest(BaseModel):
+    text: str
+
+
+@app.post("/search/intent", response_model=schemas.PriceComparisonResponse)
+def search_by_intent(req: IntentSearchRequest, db: Session = Depends(get_db)):
+    """Smart intent-based search: extract intent from natural language, then query DB."""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "Text is required")
+
+    # Extract structured intent from user message
+    intent = intent_extractor.extract_intent(text, use_llm=False)
+
+    # Build query
+    query = (
+        db.query(models.MenuItem, models.Restaurant)
+        .join(models.MenuCategory, models.MenuItem.category_id == models.MenuCategory.id)
+        .join(models.Restaurant, models.MenuCategory.restaurant_id == models.Restaurant.id)
+        .filter(models.MenuItem.is_available.is_(True))
+        .filter(models.Restaurant.is_active.is_(True))
+        .filter(models.MenuItem.price_cents > 0)
+    )
+
+    # --- Recommendation mode: return diverse popular items ---
+    if intent.recommendation_mode and not intent.dish_name:
+        query = query.filter(models.MenuItem.price_cents >= 500)
+        query = query.filter(models.MenuItem.price_cents <= 3000)
+        rows = query.order_by(models.MenuItem.price_cents.asc()).all()
+
+        # Apply cuisine / diet / protein filters if specified
+        rows = _filter_rows(rows, intent)
+
+        # 1 per restaurant for diversity
+        seen: set[int] = set()
+        results = []
+        for item, restaurant in rows:
+            if restaurant.id in seen:
+                continue
+            seen.add(restaurant.id)
+            results.append(_to_comparison_item(item, restaurant))
+            if len(results) >= 10:
+                break
+
+        display_query = _build_display_query(intent)
+        best_value = results[0] if results else None
+        return schemas.PriceComparisonResponse(
+            query=display_query or "\U0001f525 Popular picks for you",
+            results=results,
+            best_value=best_value,
+        )
+
+    # --- Dish search mode ---
+    rows = query.order_by(models.MenuItem.price_cents.asc()).all()
+
+    # Apply cuisine / diet / protein filters
+    rows = _filter_rows(rows, intent)
+
+    # Apply price filter
+    if intent.price_max:
+        max_cents = int(intent.price_max * 100)
+        rows = [(i, r) for i, r in rows if i.price_cents <= max_cents]
+
+    # Fuzzy dish name matching
+    if intent.dish_name:
+        keywords = intent.dish_name.lower().split()
+        scored = []
+        for item, restaurant in rows:
+            name_lower = item.name.lower()
+            matched = sum(1 for kw in keywords if _fuzzy_match(kw, name_lower))
+            if matched >= max(1, len(keywords) // 2):  # At least half keywords match
+                exact_bonus = sum(1 for kw in keywords if kw in name_lower)
+                scored.append((matched + exact_bonus, item, restaurant))
+        scored.sort(key=lambda x: (-x[0], x[1].price_cents))
+        rows = [(item, rest) for _, item, rest in scored]
+    else:
+        # No dish name but has other filters (cuisine, diet, etc.)
+        # Return diverse results
+        seen_r: set[int] = set()
+        diverse = []
+        for item, restaurant in rows:
+            if restaurant.id in seen_r:
+                continue
+            seen_r.add(restaurant.id)
+            diverse.append((item, restaurant))
+            if len(diverse) >= 10:
+                break
+        rows = diverse
+
+    results = [_to_comparison_item(item, rest) for item, rest in rows[:15]]
+    display_query = _build_display_query(intent)
+    best_value = results[0] if results else None
+
+    return schemas.PriceComparisonResponse(
+        query=display_query or text,
+        results=results,
+        best_value=best_value,
+    )
+
+
+def _filter_rows(rows, intent):
+    """Apply cuisine / diet / protein filters to rows."""
+    filtered = rows
+    if intent.cuisine:
+        cuisine_lower = intent.cuisine.lower()
+        filtered = [
+            (i, r) for i, r in filtered
+            if (i.cuisine and cuisine_lower in i.cuisine.lower())
+            or (r.name and cuisine_lower in r.name.lower())
+            or (i.description and cuisine_lower in i.description.lower())
+        ]
+        # If no results with strict filter, return unfiltered
+        if not filtered:
+            filtered = rows
+
+    if intent.protein_type:
+        protein_lower = intent.protein_type.lower()
+        strict = [
+            (i, r) for i, r in filtered
+            if (i.protein_type and protein_lower in i.protein_type.lower())
+            or protein_lower in i.name.lower()
+            or (i.description and protein_lower in i.description.lower())
+        ]
+        if strict:
+            filtered = strict
+
+    if intent.diet_type:
+        diet_lower = intent.diet_type.lower().replace("-", "")
+        # For vegetarian/vegan, filter by name keywords
+        veg_keywords = ["veg", "paneer", "tofu", "mushroom", "plant"]
+        if "veg" in diet_lower:
+            strict = [
+                (i, r) for i, r in filtered
+                if any(kw in i.name.lower() for kw in veg_keywords)
+                or (i.description and any(kw in i.description.lower() for kw in veg_keywords))
+            ]
+            if strict:
+                filtered = strict
+
+    return filtered
+
+
+def _to_comparison_item(item, restaurant) -> schemas.PriceComparisonItem:
+    return schemas.PriceComparisonItem(
+        item_id=item.id,
+        item_name=item.name,
+        price_cents=item.price_cents,
+        restaurant_name=restaurant.name,
+        restaurant_id=restaurant.id,
+        city=restaurant.city,
+        rating=restaurant.rating,
+        description=item.description,
+    )
+
+
+def _build_display_query(intent) -> str:
+    """Build a human-readable display query from the intent."""
+    parts = []
+    if intent.dish_name:
+        parts.append(intent.dish_name)
+    if intent.cuisine:
+        parts.append(intent.cuisine)
+    if intent.protein_type and intent.protein_type not in (intent.dish_name or ""):
+        parts.append(intent.protein_type)
+    if intent.diet_type:
+        parts.append(intent.diet_type)
+    if intent.price_max:
+        parts.append(f"under ${intent.price_max:.0f}")
+    if intent.people_count:
+        parts.append(f"for {intent.people_count} people")
+    if intent.budget_total:
+        parts.append(f"budget ${intent.budget_total:.0f}")
+    if intent.recommendation_mode and not parts:
+        return "\U0001f525 Popular picks for you"
+    return " · ".join(parts) if parts else ""
+
+
 def restaurant_categories(restaurant_id: int, db: Session = Depends(get_db)):
     return crud.list_categories(db, restaurant_id)
 
