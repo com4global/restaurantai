@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
+import { useVoiceController } from "./voice/useVoiceController.js";
 
 const RADIUS_OPTIONS = [5, 10, 15, 25, 50];
 
@@ -128,6 +129,8 @@ const welcomeMsg = {
   content: "Hello! Pick a restaurant from the Home tab, then browse menus and add items here.",
 };
 
+const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+
 export default function App() {
   // Active tab
   const [tab, setTab] = useState("home");
@@ -142,12 +145,32 @@ export default function App() {
   // Chat
   const [messageText, setMessageText] = useState("");
   const [messages, setMessages] = useState([welcomeMsg]);
-  const [sessionId, setSessionId] = useState(null);
+  // Session persisted in localStorage to survive hot reload / refresh
+  const [sessionId, _setSessionId] = useState(() => {
+    const saved = localStorage.getItem("chat_sessionId");
+    return saved ? parseInt(saved, 10) : null;
+  });
+  const setSessionId = (id) => {
+    _setSessionId(id);
+    if (id != null) localStorage.setItem("chat_sessionId", String(id));
+    else localStorage.removeItem("chat_sessionId");
+  };
 
   // Restaurants
   const [restaurants, setRestaurants] = useState([]);
   const [nearbyPlaces, setNearbyPlaces] = useState([]);
-  const [selectedRestaurant, setSelectedRestaurant] = useState(null);
+  // Selected restaurant persisted in localStorage
+  const [selectedRestaurant, _setSelectedRestaurant] = useState(() => {
+    try {
+      const saved = localStorage.getItem("chat_selectedRestaurant");
+      return saved ? JSON.parse(saved) : null;
+    } catch { return null; }
+  });
+  const setSelectedRestaurant = (r) => {
+    _setSelectedRestaurant(r);
+    if (r) localStorage.setItem("chat_selectedRestaurant", JSON.stringify({ id: r.id, name: r.name, slug: r.slug }));
+    else localStorage.removeItem("chat_selectedRestaurant");
+  };
 
   // Location state
   const [zipcode, setZipcode] = useState(localStorage.getItem("zipcode") || "");
@@ -181,17 +204,19 @@ export default function App() {
   const [myOrders, setMyOrders] = useState([]);
   const [ordersTab, setOrdersTab] = useState("current");
 
-  // Voice Conversation Mode
-  const [voiceMode, setVoiceMode] = useState(false);
-  const [voiceState, setVoiceState] = useState("idle"); // idle | speaking | listening | processing
-  const [voiceTranscript, setVoiceTranscript] = useState("");
-  const [isListening, setIsListening] = useState(false);
-  const voiceRecRef = useRef(null);
-  const voiceModeRef = useRef(false);
-  const voiceStateRef = useRef("idle");
+  // Voice Conversation Mode — powered by useVoiceController hook
+  // (manages SpeechRecognizer, IntentParser, TTSPlayer, state machine)
+  const doSendRef = useRef(null);
+  const voiceSpeakRef = useRef(null);
+  const voice = useVoiceController({ apiBase: API, doSendRef });
+  const { voiceMode, voiceState, liveTranscript, voiceTranscript, isListening, voiceModeRef, voiceStateRef } = voice;
+  const voiceStartListeningRef = useRef(null);
   const lastVoicePromptRef = useRef(null);
-  // Keep voiceStateRef synced
-  useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
+  // Bridge voiceSpeakRef for doSend's fromVoice paths
+  useEffect(() => {
+    voiceSpeakRef.current = (text) => voice.speak(text);
+    voiceStartListeningRef.current = () => voice.startListening();
+  }, [voice.speak, voice.startListening]);
 
   // Owner
   const [showOwnerPortal, setShowOwnerPortal] = useState(() => localStorage.getItem("userRole") === "owner");
@@ -201,9 +226,15 @@ export default function App() {
   const inputRef = useRef(null);
   const chatEndRef = useRef(null);
   const [addedItemId, setAddedItemId] = useState(null);
-  const doSendRef = useRef(null);
-  const voiceSpeakRef = useRef(null);
-  const voiceStartListeningRef = useRef(null);
+  // Conversation state (persists filters across turns: dish, price, restaurant, diet)
+  const convStateRef = useRef({ dish: null, protein: null, cuisine: null, spice: null, diet: null, priceMax: null, priceMin: null, priceRange: null, restaurant: null, restaurantId: null, quantity: 1, rating: null, sortBy: null, lastQuery: null, lastResults: null, turnCount: 0 });
+
+  // Helper: build sendMessage payload with restaurant_id for session recovery
+  const buildChatPayload = (text, overrideSessionId) => {
+    const payload = { session_id: overrideSessionId !== undefined ? overrideSessionId : sessionId, text };
+    if (selectedRestaurant?.id) payload.restaurant_id = selectedRestaurant.id;
+    return payload;
+  };
 
   // Budget Optimizer
   const [showOptimizer, setShowOptimizer] = useState(false);
@@ -382,220 +413,393 @@ export default function App() {
     if (userLat != null && userLng != null) await fetchRestaurantsData(userLat, userLng, newRadius);
   };
 
-  // ===================== VOICE CONVERSATION MODE (SARVAM AI) =====================
+  // ===================== VOICE (ULTRA-LOW LATENCY via useVoiceController) =====================
+  // All voice logic (STT, TTS, intent parsing, state machine, barge-in) is in the hook.
+  // toggleVoiceMode and startListening are thin wrappers.
+  const toggleVoiceMode = () => voice.toggleVoiceMode();
+  const startListening = () => voice.toggleVoiceMode();
 
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const audioContextRef = useRef(null);
-  const voiceAudioRef = useRef(null); // for playing TTS audio
-  const ttsAudioElRef = useRef(null); // persistent <audio> element for iOS
-  // Tiny silent WAV to 'warm up' audio element on user gesture (iOS requirement)
-  const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
-
-  // Speak text — Browser SpeechSynthesis (synchronous, works on all mobile devices)
-  // NOTE: Sarvam AI TTS code removed from voiceSpeak — it caused async context issues
-  // that broke audio playback on mobile. Sarvam AI is still used for STT + LLM matching.
-  const voiceSpeak = (text, autoListenAfter = true) => {
-    if (!text) return;
-    window.speechSynthesis?.cancel();
-    setVoiceState("speaking");
-
-    const afterSpeak = () => {
-      if (autoListenAfter && voiceModeRef.current) {
-        voiceStartListeningRef.current();
-      } else {
-        setVoiceState("idle");
-      }
-    };
-
-    if (window.speechSynthesis) {
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05;
-      u.pitch = 1.0;
-      u.lang = "en-US";
-      u.onend = afterSpeak;
-      u.onerror = afterSpeak;
-      window.speechSynthesis.speak(u);
-    } else {
-      afterSpeak();
-    }
-  };
-  voiceSpeakRef.current = voiceSpeak;  // Keep ref in sync
-
-  // Start listening via browser SpeechRecognition (fast, works on mobile)
-  const voiceStartListening = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      console.error("SpeechRecognition not supported");
-      setVoiceState("idle");
-      return;
-    }
-    if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch (e) { } }
-
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.maxAlternatives = 1;
-    voiceRecRef.current = rec;
-
-    rec.onstart = () => {
-      setIsListening(true);
-      setVoiceState("listening");
-      setVoiceTranscript("");
-    };
-
-    rec.onresult = (e) => {
-      let finalText = "", interimText = "";
-      for (let i = 0; i < e.results.length; i++) {
-        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
-        else interimText += e.results[i][0].transcript;
-      }
-      setVoiceTranscript(finalText || interimText);
-      if (finalText) {
-        setIsListening(false);
-        setVoiceState("processing");
-        doSendRef.current(finalText.trim(), true);  // Use ref to avoid stale closure
-      }
-    };
-
-    rec.onerror = (e) => {
-      console.error("SpeechRecognition error:", e.error);
-      setIsListening(false);
-      if (e.error === 'no-speech' && voiceModeRef.current) {
-        setTimeout(() => { if (voiceModeRef.current) voiceStartListeningRef.current(); }, 500);
-      } else if (e.error === 'aborted') {
-        // Intentionally aborted, do nothing
-      } else {
-        setVoiceTranscript("Mic error: " + e.error);
-        setVoiceState("idle");
-      }
-    };
-
-    rec.onend = () => {
-      setIsListening(false);
-      if (voiceModeRef.current && voiceStateRef.current === "listening") {
-        setTimeout(() => { if (voiceModeRef.current) voiceStartListeningRef.current(); }, 300);
-      }
-    };
-
-    try {
-      rec.start();
-    } catch (err) {
-      console.error("Failed to start recognition:", err);
-      setVoiceState("idle");
-    }
-  };
-  voiceStartListeningRef.current = voiceStartListening;  // Keep ref in sync
-
-  // Toggle voice mode
-  const toggleVoiceMode = () => {
-    if (voiceMode) {
-      voiceModeRef.current = false;
-      setVoiceMode(false); setVoiceState("idle"); setVoiceTranscript(""); setIsListening(false);
-      if (voiceAudioRef.current) { voiceAudioRef.current.pause(); voiceAudioRef.current = null; }
-      if (voiceRecRef.current) { try { voiceRecRef.current.abort(); } catch (e) { } }
-    } else {
-      voiceModeRef.current = true;
-      setVoiceMode(true);
-      // Short initial prompt based on current state
-      let prompt;
-      if (!selectedRestaurant) prompt = "Which restaurant would you like?";
-      else if (currentItems.length > 0) prompt = "Which item would you like to add?";
-      else prompt = "Say a category name.";
-      voiceSpeakRef.current(prompt, true);
-    }
-  };
-
-  const startListening = () => { toggleVoiceMode(); };
 
   // ===================== CHAT / SEND =====================
 
-  const doSend = async (text, fromVoice = false) => {
+  const doSend = async (text, fromVoice = false, voiceConfidence = 0) => {
     if (!text.trim()) return;
     const trimmed = text.trim();
     setMessages((p) => [...p, { role: "user", content: trimmed }]);
     setMessageText(""); setShowSuggestions(false); setStatus("Thinking...");
 
-    // ── Smart Intent-Based Search ────────────────────────────────────
-    // When no restaurant is selected, send ANY input to the intent engine.
-    // The backend extracts dish name, cuisine, diet, budget, etc. and returns
-    // matching items. Handles everything: "pizza", "cheap Indian food",
-    // "i dont know what to eat", "feed 5 people under $50", etc.
-    const skipIntentSearch = trimmed.startsWith("#") || trimmed.startsWith("add:") || trimmed.length <= 2;
+    // ── Intent Router ────────────────────────────────────────────────
+    // Classify the message into an intent, then route accordingly.
 
-    // ── Meal Plan Detection (works from ANY context) ──────────────────
-    const mealPlanRegex = /(?:plan|create|make|generate|build)\s+(?:my\s+|a\s+)?(?:meal|food|dinner|lunch)s?\s*(?:plan)?|(?:weekly|daily|\d+\s*day)\s+(?:meal|food|dinner|lunch)\s*plan|meal\s*plan|(?:healthy|vegetarian|vegan|keto)\s+(?:meal|food|dinner|lunch)\s*plan|(?:dinner|lunch|breakfast|food)\s+plan/i;
-    if (!skipIntentSearch && mealPlanRegex.test(trimmed)) {
-      try {
-        const data = await generateMealPlan(trimmed);
-        if (data.days && data.days.length > 0) {
-          setMessages((p) => [...p, {
-            role: "bot",
-            content: `__MEAL_PLAN__`,
-            mealPlan: data,
-          }]);
-          setStatus("Ready.");
-          return;
-        }
-      } catch (err) {
-        setMessages((p) => [...p, {
-          role: "bot",
-          content: "Sorry, I had trouble generating a meal plan. Try: \"plan meals for the week under $100\"",
-        }]);
+    // Voice input: run through 5-layer production validation pipeline
+    let cleanedText = trimmed;
+    if (fromVoice) {
+      const { validateVoiceInput, getRejectionMessage } = await import("./voice/VoiceValidator.js");
+      const allRestsForValidation = [
+        ...restaurants,
+        ...nearbyPlaces.map(r => ({ ...r, slug: r.slug || r.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') })),
+      ];
+      const validation = validateVoiceInput(trimmed, voiceConfidence, allRestsForValidation);
+
+      // Log all layer decisions
+      validation.layers.forEach(l => {
+        const color = l.startsWith('✅') ? '#00ff88' : l.startsWith('❌') ? '#ff4444' : '#ffaa00';
+        console.log(`%c[Validator] ${l}`, `color: ${color}`);
+      });
+
+      if (!validation.valid) {
+        const msg = getRejectionMessage(validation.reason);
+        console.log(`%c[Validator] ❌ REJECTED: ${validation.reason} — "${msg}"`, 'color: #ff4444; font-weight: bold');
+        setMessages((p) => [...p, { role: "bot", content: msg }]);
         setStatus("Ready.");
+        if (voiceModeRef.current) voiceSpeakRef.current(msg, true);
         return;
+      }
+
+      cleanedText = validation.text;
+      if (cleanedText !== trimmed.toLowerCase()) {
+        console.log(`%c[Validator] ✅ PASSED — cleaned: "${cleanedText}"`, 'color: #00ff88; font-weight: bold');
       }
     }
 
-    if (!selectedRestaurant && !skipIntentSearch) {
-      try {
-        const data = await searchByIntent(trimmed);
-        if (data.results && data.results.length > 0) {
+    const skipIntentSearch = cleanedText.startsWith("#") || cleanedText.startsWith("add:") || cleanedText.length <= 2;
+
+    if (!skipIntentSearch) {
+      const { parseIntent, INTENTS, buildSearchQuery } = await import("./voice/IntentParser.js");
+      const { applyUpdate, buildQuery, describeFilters, resetForNewSearch } = await import("./voice/ConversationState.js");
+
+      // Combine partnered restaurants + nearby places (from Google) for matching
+      const allRestaurants = [
+        ...restaurants.map(r => ({ ...r, partnered: true })),
+        ...nearbyPlaces.map(r => ({ ...r, slug: r.slug || r.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''), partnered: false })),
+      ];
+      console.log(`%c[IntentRouter] 📊 Available: ${restaurants.length} partnered + ${nearbyPlaces.length} nearby = ${allRestaurants.length} restaurants`, 'color: #888');
+      if (allRestaurants.length > 0) console.log(`%c[IntentRouter] 🏪 Names: ${allRestaurants.map(r => r.name).join(', ')}`, 'color: #888; font-size: 10px');
+
+      const intentResult = parseIntent(cleanedText, convStateRef.current, allRestaurants);
+      console.log(`%c[IntentRouter] 🎯 Intent: ${intentResult.intent} (${intentResult.parseTimeMs.toFixed(1)}ms)`, 'color: #ff6600; font-weight: bold; font-size: 13px');
+      console.log(`%c[IntentRouter] 📝 Input: "${cleanedText}" | Entities:`, 'color: #aaa', intentResult.entities, '| StateUpdate:', intentResult.stateUpdate);
+      if (intentResult.restaurantMatch) console.log(`%c[IntentRouter] 🏪 Restaurant match: "${intentResult.restaurantMatch.name}"`, 'color: #00ff88; font-weight: bold');
+      console.log(`%c[IntentRouter] 💾 Conv state:`, 'color: #aaa', { ...convStateRef.current });
+
+      // ── GREETING / HELP / THANKS / GOODBYE ──────────────────────
+      if (intentResult.intent === INTENTS.GREETING) {
+        const reply = "Yes, I can hear you! 🎤 Try asking for food like \"pizza\" or \"biryani\", or say a restaurant name to get started.";
+        setMessages((p) => [...p, { role: "bot", content: reply }]);
+        setStatus("Ready.");
+        if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("I can hear you! Ask for any food like pizza or biryani.", true);
+        return;
+      }
+      if (intentResult.intent === INTENTS.HELP) {
+        const reply = "I'm your AI food assistant! 🍽️ You can:\n• Search for food: \"pizza\", \"biryani\"\n• Find deals: \"cheap Indian food under $15\"\n• Modify results: \"make it veg\", \"show cheaper\"\n• Switch restaurants: \"change to Desi District\"\n• Plan meals: \"plan meals for the week\"\nJust speak or type what you're craving!";
+        setMessages((p) => [...p, { role: "bot", content: reply }]);
+        setStatus("Ready.");
+        if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("I'm your food assistant. What are you looking for?", true);
+        return;
+      }
+      if (intentResult.intent === INTENTS.THANKS) {
+        const reply = "You're welcome! 😊 Let me know if you need anything else — just ask for any food!";
+        setMessages((p) => [...p, { role: "bot", content: reply }]);
+        setStatus("Ready.");
+        if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("You're welcome! Ask for anything else.", true);
+        return;
+      }
+      if (intentResult.intent === INTENTS.GOODBYE) {
+        const reply = "Goodbye! 👋 Come back anytime you're hungry!";
+        setMessages((p) => [...p, { role: "bot", content: reply }]);
+        setStatus("Ready.");
+        if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Goodbye! Come back anytime.", true);
+        return;
+      }
+
+      // ── CHANGE RESTAURANT ──────────────────────────────────────
+      if (intentResult.intent === INTENTS.CHANGE_RESTAURANT && intentResult.restaurantMatch) {
+        const matchedRest = intentResult.restaurantMatch;
+        // Update conversation state: keep dish/diet/price, change restaurant
+        convStateRef.current = applyUpdate(convStateRef.current, intentResult.stateUpdate);
+
+        setSelectedRestaurant(matchedRest);
+        setTab("chat");
+
+        // IMPORTANT: await the restaurant selection so sessionId is updated
+        // This was previously fire-and-forget, causing the next call to use a stale session
+        try {
+          console.log(`%c[IntentRouter] 🏪 Selecting restaurant: #${matchedRest.slug}`, 'color: #00bbff; font-weight: bold');
+          const selectRes = await sendMessage(token, buildChatPayload(`#${matchedRest.slug}`, null));
+          // Update session with the new restaurant's session
+          if (selectRes.session_id) {
+            setSessionId(selectRes.session_id);
+            console.log(`%c[IntentRouter] ✅ Session updated: ${selectRes.session_id}`, 'color: #00ff88');
+          }
+          // Show categories if returned
+          if (selectRes.categories && selectRes.categories.length > 0) {
+            setActiveCategories(selectRes.categories);
+            setActiveCategoryName(null);
+            setCurrentItems([]);
+            const catNames = selectRes.categories.map(c => typeof c === 'string' ? c : c.name).join(', ');
+            setMessages((p) => [...p, {
+              role: "bot",
+              content: selectRes.reply || `Welcome to **${matchedRest.name}**! Categories: ${catNames}`,
+              categories: selectRes.categories,
+            }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
+            }
+            return;
+          }
+
+          // Categories empty — try a follow-up to load menu
+          console.log(`%c[IntentRouter] ⚠️ No categories from #slug — trying process_message('show menu')`, 'color: #ffaa00');
+          const menuRes = await sendMessage(token, buildChatPayload('show menu'));
+          if (menuRes.session_id) setSessionId(menuRes.session_id);
+          if (menuRes.categories && menuRes.categories.length > 0) {
+            setActiveCategories(menuRes.categories);
+            setActiveCategoryName(null);
+            setCurrentItems([]);
+            const catNames = menuRes.categories.map(c => typeof c === 'string' ? c : c.name).join(', ');
+            setMessages((p) => [...p, {
+              role: "bot",
+              content: menuRes.reply || `Welcome to **${matchedRest.name}**! Categories: ${catNames}`,
+              categories: menuRes.categories,
+            }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
+            }
+            return;
+          }
+          // Still nothing — show reply from backend or generic message
           setMessages((p) => [...p, {
             role: "bot",
-            content: `__PRICE_COMPARE__`,
-            priceCompare: data,
+            content: menuRes.reply || selectRes.reply || `Switched to **${matchedRest.name}**! Ask me what you'd like to order.`,
           }]);
           setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current(`Switched to ${matchedRest.name}. What would you like?`);
+          }
+          return;
+        } catch (err) {
+          console.error(`%c[IntentRouter] ❌ Restaurant select failed:`, 'color: #ff4444', err);
+        }
+
+        // Fallback: if we have existing food filters, re-search with the new restaurant context
+        const cs = convStateRef.current;
+        if (cs.dish || cs.protein || cs.cuisine) {
+          const filterDesc = describeFilters(cs);
+          setMessages((p) => [...p, { role: "bot", content: `Switched to **${matchedRest.name}**! Searching for ${filterDesc}...` }]);
+          setStatus("Searching...");
+          try {
+            const query = buildQuery(cs);
+            const data = await searchByIntent(query);
+            if (data.results && data.results.length > 0) {
+              cs.lastResults = data.results;
+              setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
+              setStatus("Ready.");
+              if (fromVoice && voiceModeRef.current) voiceSpeakRef.current(`Found ${data.results.length} options at ${matchedRest.name}.`);
+            } else {
+              setMessages((p) => [...p, { role: "bot", content: `No ${filterDesc} found at **${matchedRest.name}**. Try a different dish!` }]);
+              setStatus("Ready.");
+              if (fromVoice && voiceModeRef.current) voiceSpeakRef.current(`No matching items. Try a different dish.`);
+            }
+          } catch {
+            setMessages((p) => [...p, { role: "bot", content: `Switched to **${matchedRest.name}**! What would you like to order?` }]);
+            setStatus("Ready.");
+          }
+        } else {
+          setMessages((p) => [...p, { role: "bot", content: `Switched to **${matchedRest.name}**! What would you like to order?` }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current(`Switched to ${matchedRest.name}. What would you like?`);
+        }
+        return;
+      }
+
+      // ── FILTER UPDATE (modify existing search) ─────────────────
+      if (intentResult.intent === INTENTS.FILTER_UPDATE) {
+        convStateRef.current = applyUpdate(convStateRef.current, intentResult.stateUpdate);
+        const cs = convStateRef.current;
+        const filterDesc = describeFilters(cs);
+        const query = buildQuery(cs);
+
+        setMessages((p) => [...p, { role: "bot", content: `Updating filters: ${filterDesc}...` }]);
+        setStatus("Searching...");
+
+        try {
+          const data = await searchByIntent(query);
+          if (data.results && data.results.length > 0) {
+            cs.lastResults = data.results;
+            setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) voiceSpeakRef.current(`Found ${data.results.length} options for ${filterDesc}.`, true);
+          } else {
+            setMessages((p) => [...p, { role: "bot", content: `No results for ${filterDesc}. Try relaxing your filters!` }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) voiceSpeakRef.current(`No results for ${filterDesc}. Try different filters.`, true);
+          }
+        } catch {
+          setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble updating the search. Try again!" }]);
+          setStatus("Ready.");
+        }
+        return;
+      }
+
+      // ── MEAL PLAN ──────────────────────────────────────────────
+      if (intentResult.intent === INTENTS.MEAL_PLAN) {
+        try {
+          const data = await generateMealPlan(trimmed);
+          if (data.days && data.days.length > 0) {
+            setMessages((p) => [...p, { role: "bot", content: `__MEAL_PLAN__`, mealPlan: data }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Here's your meal plan! Say another request or say 'done'.", true);
+            return;
+          }
+        } catch { }
+        setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble generating a meal plan. Try: \"plan meals for the week under $100\"" }]);
+        setStatus("Ready.");
+        if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Sorry, I couldn't generate a meal plan.", true);
+        return;
+      }
+
+      // ── CHECKOUT ───────────────────────────────────────────────
+      if (intentResult.intent === INTENTS.CHECKOUT) {
+        // Fall through to the existing checkout logic in process_message
+      }
+
+      // ── SHOW CART ──────────────────────────────────────────────
+      if (intentResult.intent === INTENTS.SHOW_CART) {
+        setShowCartPanel(true);
+        setMessages((p) => [...p, { role: "bot", content: "Here's your cart! 🛒" }]);
+        setStatus("Ready.");
+        if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Here's your cart.", true);
+        return;
+      }
+
+      // ── NEW SEARCH ─────────────────────────────────────────────
+      // Only do global search when no restaurant is selected AND no active categories
+      // If restaurant IS selected or categories are active, fall through to process_message
+      if (intentResult.intent === INTENTS.NEW_SEARCH && !selectedRestaurant && activeCategories.length === 0) {
+        // Reset state with new search filters
+        const { createState } = await import("./voice/ConversationState.js");
+        convStateRef.current = applyUpdate(createState(), intentResult.stateUpdate);
+        convStateRef.current.lastQuery = trimmed;
+
+        try {
+          const data = await searchByIntent(trimmed);
+          if (data.results && data.results.length > 0) {
+            convStateRef.current.lastResults = data.results;
+            const topItem = data.results[0]?.name || 'food';
+            const count = data.results.length;
+            setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
+            setStatus("Ready.");
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`Found ${count} options. Which one?`, true);
+            }
+            return;
+          }
+          setMessages((p) => [...p, { role: "bot", content: "I couldn't find anything matching that. Try a dish name, cuisine, or say \"suggest something\"!" }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("I couldn't find anything. Try a different dish name.", true);
+          return;
+        } catch {
+          setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble processing that. Try again or ask for a specific dish!" }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Network issue, try again.", true);
           return;
         }
-        // Backend returned 0 results (shouldn't happen with fallback, but just in case)
-        setMessages((p) => [...p, {
-          role: "bot",
-          content: "I couldn't find anything matching that. Try asking for a dish name, cuisine, or say \"suggest something\"!",
-        }]);
-        setStatus("Ready.");
-        return;
-      } catch (err) {
-        // Network/API error — show friendly message, don't fall through to old chat
-        setMessages((p) => [...p, {
-          role: "bot",
-          content: "Sorry, I had trouble processing that. Try again or ask for a specific dish like \"pizza\" or \"biryani\"!",
-        }]);
-        setStatus("Ready.");
-        return;
+      }
+
+      // If restaurant is selected or categories are active, check for category match FIRST
+      if (selectedRestaurant || activeCategories.length > 0) {
+        // ── Client-side category matching (instant, no backend) ──────
+        if (activeCategories.length > 0) {
+          const inputLower = (fromVoice ? cleanedText : trimmed).toLowerCase().replace(/\s+/g, '');
+          const matchedCat = activeCategories.find(cat => {
+            const catLower = cat.name.toLowerCase().replace(/\s+/g, '');
+            return catLower === inputLower
+              || catLower.startsWith(inputLower)
+              || inputLower.startsWith(catLower)
+              || catLower.includes(inputLower)
+              || inputLower.includes(catLower);
+          });
+          if (matchedCat) {
+            console.log(`%c[CategoryMatch] ✅ "${fromVoice ? cleanedText : trimmed}" → category "${matchedCat.name}" (id: ${matchedCat.id})`, 'color: #00ff88; font-weight: bold');
+            setActiveCategoryName(matchedCat.name);
+            try {
+              const res = await sendMessage(token, buildChatPayload(`category:${matchedCat.id}`));
+              setSessionId(res.session_id);
+              if (res.items && res.items.length > 0) setCurrentItems(res.items);
+              if (res.categories && res.categories.length > 0) setActiveCategories(res.categories);
+              setMessages((p) => [...p, {
+                role: "bot",
+                content: res.reply || `${matchedCat.name} — ${res.items?.length || 0} items`,
+                items: res.items,
+              }]);
+              setStatus("Ready.");
+              if (fromVoice && voiceModeRef.current) {
+                voiceSpeakRef.current(`${matchedCat.name}. Which one would you like?`, true);
+              }
+              return;
+            } catch (err) {
+              console.error('[CategoryMatch] ❌ Failed:', err);
+            }
+          }
+        }
+        console.log(`%c[IntentRouter] ➡️ Restaurant selected — sending to process_message`, 'color: #00bbff; font-weight: bold');
+        // Don't return — fall through to process_message below
+      }
+
+      // ── UNCLEAR but no restaurant selected ──────────────────────
+      if (!selectedRestaurant && intentResult.intent === INTENTS.UNCLEAR) {
+        // For voice: don't do global search on unclear/garbled input — it returns random results
+        if (fromVoice) {
+          console.log('%c[IntentRouter] ⚠️ UNCLEAR voice input — asking to retry (no global search)', 'color: #ffaa00; font-weight: bold');
+          setMessages((p) => [...p, { role: "bot", content: "I didn't quite get that. Try saying a dish name like \"biryani\" or a restaurant name." }]);
+          setStatus("Ready.");
+          if (voiceModeRef.current) voiceSpeakRef.current("I didn't quite get that. Try saying a dish name or restaurant name.", true);
+          return;
+        }
+        // For text: try searchByIntent as fallback
+        try {
+          const data = await searchByIntent(cleanedText);
+          if (data.results && data.results.length > 0) {
+            convStateRef.current.lastQuery = cleanedText;
+            convStateRef.current.lastResults = data.results;
+            setMessages((p) => [...p, { role: "bot", content: `__PRICE_COMPARE__`, priceCompare: data }]);
+            setStatus("Ready.");
+            return;
+          }
+        } catch { }
+        // Fall through to process_message
       }
     }
 
-    // If restaurant IS selected, allow explicit price comparison keywords
+
+
     if (selectedRestaurant && /cheapest|cheap|compare|price|best\s+value|lowest/i.test(trimmed)) {
       try {
         const data = await searchByIntent(trimmed);
         if (data.results && data.results.length > 0) {
+          const topItem = data.results[0]?.name || 'food';
+          const count = data.results.length;
           setMessages((p) => [...p, {
             role: "bot",
             content: `__PRICE_COMPARE__`,
             priceCompare: data,
           }]);
           setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current(`Found ${count} options. Which one?`, true);
+          }
           return;
         }
       } catch (err) { /* fall through to normal chat */ }
     }
 
     try {
-      const res = await sendMessage(token, { session_id: sessionId, text: text.trim() });
+      const textToSend = fromVoice ? cleanedText : text.trim();
+      console.log(`%c[Backend] 📤 process_message("${textToSend}")`, 'color: #bb88ff; font-weight: bold');
+      const res = await sendMessage(token, buildChatPayload(textToSend));
+      console.log(`%c[Backend] 📥 Reply: "${res.reply?.substring(0, 80)}..." | Categories: ${res.categories?.length || 0} | Items: ${res.items?.length || 0}`, 'color: #bb88ff', { categories: res.categories, items: res.items?.map(i => i.name) });
       setSessionId(res.session_id);
       setMessages((p) => [...p, {
         role: "bot", content: res.reply,
@@ -628,12 +832,14 @@ export default function App() {
       if (fromVoice && voiceModeRef.current) {
         const voiceReply = res.voice_prompt || res.reply;
         if (res.reply.toLowerCase().includes("submitted") || res.reply.toLowerCase().includes("placed")) {
+          console.log('%c[TTS] 🔊 Speaking: "Order placed! Thank you!"', 'color: #ff88ff; font-weight: bold');
           voiceSpeakRef.current("Order placed! Thank you!", false);
           setTimeout(() => {
             voiceModeRef.current = false;
             setVoiceMode(false); setVoiceState("idle");
           }, 2000);
         } else {
+          console.log(`%c[TTS] 🔊 Speaking: "${voiceReply?.substring(0, 80)}..."`, 'color: #ff88ff; font-weight: bold');
           // Speak the voice_prompt and auto-listen after
           voiceSpeakRef.current(voiceReply, true);
         }
@@ -1242,12 +1448,10 @@ export default function App() {
                       <span className="voice-status-text">
                         {voiceState === "speaking" ? "🔊 Speaking..." : voiceState === "listening" ? "🎙️ Listening..." : voiceState === "processing" ? "⏳ Processing..." : "🎤 Voice On"}
                       </span>
-                      {voiceTranscript && <span className="voice-heard">“{voiceTranscript}”</span>}
+                      {liveTranscript && <span className="voice-live" style={{ color: "#aef", fontStyle: "italic", marginLeft: 6, fontSize: "0.85em" }}>{liveTranscript}</span>}
                       <button className="voice-end-btn" onClick={toggleVoiceMode}>✕</button>
                     </div>
                   )}
-                  {/* Hidden audio element for Sarvam TTS (DOM-rendered for iOS compatibility) */}
-                  <audio ref={ttsAudioElRef} playsInline preload="none" style={{ display: 'none' }} />
 
                   {/* Input */}
                   <form onSubmit={handleSend} className="ai-chat-input-row" style={{ position: 'relative' }}>

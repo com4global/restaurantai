@@ -1,14 +1,19 @@
 """
-Voice endpoints for Sarvam AI STT + TTS.
-POST /api/voice/stt  — receive audio blob, return transcript
-POST /api/voice/tts  — receive text, return base64 audio
+Voice endpoints for Sarvam AI STT + TTS + Conversation.
+POST /api/voice/stt       — receive audio blob, return transcript
+POST /api/voice/tts       — receive text, return base64 audio
+POST /api/voice/chat      — receive text, return AI reply
+POST /api/voice/converse  — full pipeline: audio → STT → chat engine → TTS → audio reply
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from . import sarvam_service
+from . import sarvam_service, chat, crud, models
+from .auth import get_current_user
+from .db import get_db
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -92,3 +97,105 @@ async def voice_chat(req: ChatRequest):
         return {"reply": reply}
     except RuntimeError as e:
         raise HTTPException(502, str(e))
+
+
+# ---------- Full Conversation Pipeline ----------
+
+@router.post("/converse")
+async def voice_converse(
+    file: UploadFile = File(...),
+    session_id: int = Form(None),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Full voice conversation pipeline:
+    1. STT: transcribe audio → text
+    2. Chat: process_message (existing chat engine with restaurant/menu/cart logic)
+    3. TTS: convert voice_prompt → audio (Indian accent, Sarvam Bulbul v3)
+    Returns { transcript, reply, voice_prompt, audio_base64, session_id, ... }
+    """
+    # --- Step 1: STT ---
+    audio_bytes = await file.read()
+    if len(audio_bytes) == 0:
+        raise HTTPException(400, "Empty audio file")
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Audio file too large (max 10MB)")
+
+    try:
+        stt_result = sarvam_service.transcribe_audio(
+            audio_bytes,
+            filename=file.filename or "audio.webm",
+        )
+    except RuntimeError as e:
+        raise HTTPException(502, f"STT error: {str(e)}")
+
+    transcript = stt_result.get("transcript", "").strip()
+    if not transcript:
+        # Return a friendly "didn't catch that" response with TTS
+        no_speech_text = "I didn't catch that. Could you say it again?"
+        try:
+            tts_result = sarvam_service.generate_speech(
+                text=no_speech_text, language="en-IN", speaker="kavya",
+            )
+        except Exception:
+            tts_result = {"audio_base64": "", "format": "wav"}
+        return {
+            "transcript": "",
+            "reply": no_speech_text,
+            "voice_prompt": no_speech_text,
+            "audio_base64": tts_result.get("audio_base64", ""),
+            "session_id": session_id,
+        }
+
+    # --- Step 2: Chat Engine ---
+    # Get or create chat session (same pattern as /chat/message in main.py)
+    if session_id is None:
+        session = crud.create_chat_session(db, current_user.id)
+    else:
+        session = (
+            db.query(models.ChatSession)
+            .filter(models.ChatSession.id == session_id)
+            .first()
+        )
+        if not session or session.user_id != current_user.id:
+            session = crud.create_chat_session(db, current_user.id)
+
+    crud.add_chat_message(db, session.id, "user", transcript)
+    result = chat.process_message(db, session, transcript)
+    crud.add_chat_message(db, session.id, "bot", result["reply"])
+
+    # --- Step 3: TTS ---
+    voice_text = result.get("voice_prompt") or result.get("reply", "")
+    # Truncate for TTS (Sarvam limit 2500 chars) and clean markdown
+    import re
+    voice_text = re.sub(r'\*\*|__|~~|`', '', voice_text)  # Strip markdown
+    voice_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', voice_text)  # Links
+    voice_text = voice_text[:2000]  # Leave buffer for Sarvam
+
+    audio_base64 = ""
+    try:
+        tts_result = sarvam_service.generate_speech(
+            text=voice_text,
+            language="en-IN",
+            speaker="kavya",
+        )
+        audio_base64 = tts_result.get("audio_base64", "")
+    except Exception as e:
+        print(f"[VOICE] TTS failed (non-fatal): {e}")
+        # Non-fatal — proceeed without audio
+
+    return {
+        "transcript": transcript,
+        "reply": result.get("reply", ""),
+        "voice_prompt": result.get("voice_prompt", ""),
+        "audio_base64": audio_base64,
+        "session_id": session.id,
+        "restaurant_id": result.get("restaurant_id"),
+        "category_id": result.get("category_id"),
+        "order_id": result.get("order_id"),
+        "categories": result.get("categories"),
+        "items": result.get("items"),
+        "cart_summary": result.get("cart_summary"),
+    }
+

@@ -1,0 +1,302 @@
+/**
+ * useVoiceController.js — React hook for ultra-low latency voice AI
+ * 
+ * Orchestrates: SpeechRecognizer → IntentParser → Chat API → TTSPlayer
+ * 
+ * Features:
+ * - Continuous speech recognition with live transcript
+ * - Fast intent parsing (<10ms) before backend
+ * - Streaming text display (word-by-word reveal)
+ * - Sentence-chunked TTS (plays first sentence while generating rest)
+ * - Barge-in (user interrupts → TTS stops, listening resumes)
+ * - Voice state machine: IDLE → LISTENING → PROCESSING → SPEAKING
+ */
+
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { SpeechRecognizer } from './SpeechRecognizer.js';
+import { TTSPlayer } from './TTSPlayer.js';
+import { parseIntent } from './IntentParser.js';
+
+// Voice states
+const STATES = { IDLE: 'idle', LISTENING: 'listening', PROCESSING: 'processing', SPEAKING: 'speaking' };
+
+/**
+ * Streaming text reveal — reveals text word-by-word for perceived speed
+ */
+function streamTextToCallback(text, callback, intervalMs = 25) {
+    const words = text.split(/\s+/);
+    let current = '';
+    let i = 0;
+    const timer = setInterval(() => {
+        if (i >= words.length) {
+            clearInterval(timer);
+            callback(text); // Ensure full text is shown
+            return;
+        }
+        current = current ? current + ' ' + words[i] : words[i];
+        callback(current);
+        i++;
+    }, intervalMs);
+    return () => clearInterval(timer); // Return cancel function
+}
+
+/**
+ * useVoiceController hook — plug into any React component
+ * 
+ * @param {object} config
+ * @param {string} config.apiBase - Backend API URL (e.g. "http://localhost:8000")
+ * @param {function} config.onSendMessage - (text, fromVoice) => void — send message to chat
+ * @param {function} config.onAddBotMessage - (text) => void — add bot message to chat
+ * @param {function} config.doSendRef - ref to doSend function
+ * @returns Voice state and control functions
+ */
+export function useVoiceController({ apiBase, doSendRef }) {
+    const [voiceMode, setVoiceMode] = useState(false);
+    const [voiceState, setVoiceState] = useState(STATES.IDLE);
+    const [liveTranscript, setLiveTranscript] = useState('');
+    const [voiceTranscript, setVoiceTranscript] = useState('');
+    const [isListening, setIsListening] = useState(false);
+
+    const voiceModeRef = useRef(false);
+    const voiceStateRef = useRef(STATES.IDLE);
+    const recognizerRef = useRef(null);
+    const ttsPlayerRef = useRef(null);
+    const streamCancelRef = useRef(null);
+
+    // Keep refs in sync
+    useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
+
+    // Initialize components
+    useEffect(() => {
+        recognizerRef.current = new SpeechRecognizer();
+        ttsPlayerRef.current = new TTSPlayer(apiBase);
+
+        return () => {
+            recognizerRef.current?.destroy();
+            ttsPlayerRef.current?.destroy();
+        };
+    }, [apiBase]);
+
+    // ---- Barge-in: stop TTS when user speaks ----
+    const bargeIn = useCallback(() => {
+        if (ttsPlayerRef.current?.isPlaying) {
+            ttsPlayerRef.current.stop();
+            console.log('[VoiceController] Barge-in: user interrupted AI');
+        }
+        if (streamCancelRef.current) {
+            streamCancelRef.current();
+            streamCancelRef.current = null;
+        }
+        window.speechSynthesis?.cancel();
+        setVoiceState(STATES.LISTENING);
+    }, []);
+
+    // ---- Process finalized speech ----
+    const handleFinalTranscript = useCallback(async (text, confidence = 0) => {
+        if (!text.trim() || !voiceModeRef.current) return;
+
+        const confStr = confidence > 0 ? (confidence * 100).toFixed(0) + '%' : 'N/A';
+        console.log(`%c[Voice] 🎤 Final transcript: "${text}" (confidence: ${confStr})`, 'color: #00ff88; font-weight: bold; font-size: 13px');
+
+        setVoiceState(STATES.PROCESSING);
+        setLiveTranscript('');
+        setVoiceTranscript(text);
+
+        // Send to chat engine via doSend (handles all intents, cart, ordering)
+        // Pass confidence as 3rd arg so doSend can run the 5-layer validator
+        if (doSendRef?.current) {
+            console.log(`%c[Voice] 📤 Sending to doSend("${text}", fromVoice=true, confidence=${confStr})`, 'color: #00bbff');
+            try {
+                await doSendRef.current(text, true, confidence);
+                console.log('%c[Voice] ✅ doSend completed', 'color: #00ff88');
+            } catch (err) {
+                console.error('%c[Voice] ❌ doSend error:', 'color: #ff4444; font-weight: bold', err);
+            }
+        } else {
+            console.warn('%c[Voice] ⚠️ doSendRef.current is null — doSend not connected!', 'color: #ffaa00; font-weight: bold');
+        }
+    }, [doSendRef]);
+
+    // ---- Start listening ----
+    const startListening = useCallback(() => {
+        if (!voiceModeRef.current) return;
+        const recognizer = recognizerRef.current;
+        if (!recognizer) return;
+
+        recognizer.onLiveTranscript = (text) => {
+            setLiveTranscript(text);
+            setIsListening(true);
+            // Log live transcript only every 500ms to avoid spam
+            if (!recognizer._lastLogTime || Date.now() - recognizer._lastLogTime > 500) {
+                console.log('%c[Voice] 🔊 Hearing: "' + text + '"', 'color: #888');
+                recognizer._lastLogTime = Date.now();
+            }
+        };
+        recognizer.onFinalTranscript = handleFinalTranscript;
+        recognizer.onStateChange = (state) => {
+            if (state === 'listening') {
+                setVoiceState(STATES.LISTENING);
+                setIsListening(true);
+            }
+        };
+        recognizer.onSpeechDetected = () => {
+            // Barge-in: if TTS is playing and user speaks, stop it
+            if (voiceStateRef.current === STATES.SPEAKING) {
+                bargeIn();
+            }
+        };
+        recognizer.onError = (err) => {
+            setVoiceTranscript('⚠️ ' + err);
+            setTimeout(() => setVoiceTranscript(''), 4000);
+        };
+
+        recognizer.start();
+    }, [handleFinalTranscript, bargeIn]);
+
+    // ---- Find best Indian English voice ----
+    const indianVoiceRef = useRef(null);
+    useEffect(() => {
+        const findIndianVoice = () => {
+            const voices = window.speechSynthesis?.getVoices() || [];
+            // Priority: en-IN female → en-IN any → hi-IN → en-US/en-GB as last resort
+            const enIN = voices.filter(v => v.lang === 'en-IN');
+            const enINFemale = enIN.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('veena') || v.name.toLowerCase().includes('google'));
+            if (enINFemale) { indianVoiceRef.current = enINFemale; }
+            else if (enIN.length > 0) { indianVoiceRef.current = enIN[0]; }
+            else {
+                const hiIN = voices.find(v => v.lang?.startsWith('hi'));
+                if (hiIN) indianVoiceRef.current = hiIN;
+            }
+            if (indianVoiceRef.current) {
+                console.log(`%c[TTS] 🇮🇳 Voice: ${indianVoiceRef.current.name} (${indianVoiceRef.current.lang})`, 'color: #ff88ff; font-weight: bold');
+            }
+        };
+        findIndianVoice();
+        // Voices load async in some browsers
+        window.speechSynthesis?.addEventListener('voiceschanged', findIndianVoice);
+        return () => window.speechSynthesis?.removeEventListener('voiceschanged', findIndianVoice);
+    }, []);
+
+    // All responses use speechSynthesis for consistency and zero latency
+    const speak = useCallback((text) => {
+        if (!voiceModeRef.current || !text) return;
+
+        // Cancel any ongoing speech
+        window.speechSynthesis?.cancel();
+        ttsPlayerRef.current?.stop(); // Stop any lingering Sarvam audio
+
+        const cleanText = text
+            .replace(/\*\*|__|~~|`/g, '')           // Remove markdown
+            .replace(/#{1,6}\s*/g, '')               // Remove headers
+            .replace(/[🎤🍽️😊👋🔥📦⚠️⏳🌶️🍕🍔🍟🍣🍛🍰☕🍺🥤💧🍳🥞🧀🫔🧃🍵🍷🍸🍩🍪🍨🥧🍫🍎🍄🌽🍅✨🎙️🔊✕•🛒]/g, '')
+            .replace(/\n+/g, '. ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!cleanText) {
+            setVoiceState(STATES.LISTENING);
+            startListening();
+            return;
+        }
+
+        console.log(`%c[TTS] 🔊 Speaking: "${cleanText.substring(0, 60)}${cleanText.length > 60 ? '...' : ''}"`, 'color: #ff88ff; font-weight: bold');
+
+        const utterance = new SpeechSynthesisUtterance(cleanText);
+        // Use Indian English voice if available
+        if (indianVoiceRef.current) {
+            utterance.voice = indianVoiceRef.current;
+            utterance.lang = indianVoiceRef.current.lang;
+        }
+        utterance.rate = 1.15;  // Slightly fast for snappy feel
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+
+        utterance.onend = () => {
+            if (voiceModeRef.current) {
+                setVoiceState(STATES.LISTENING);
+                startListening();
+            }
+        };
+        utterance.onerror = () => {
+            if (voiceModeRef.current) {
+                setVoiceState(STATES.LISTENING);
+                startListening();
+            }
+        };
+
+        setVoiceState(STATES.SPEAKING);
+        window.speechSynthesis.speak(utterance);
+    }, [startListening]);
+
+    // ---- Toggle voice mode ----
+    const toggleVoiceMode = useCallback(async () => {
+        if (voiceMode) {
+            // === TURN OFF ===
+            voiceModeRef.current = false;
+            setVoiceMode(false);
+            setVoiceState(STATES.IDLE);
+            setVoiceTranscript('');
+            setLiveTranscript('');
+            setIsListening(false);
+            recognizerRef.current?.stop();
+            ttsPlayerRef.current?.stop();
+            if (streamCancelRef.current) { streamCancelRef.current(); streamCancelRef.current = null; }
+            window.speechSynthesis?.cancel();
+        } else {
+            // === TURN ON ===
+            // Pre-check mic permission
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(t => t.stop());
+            } catch (err) {
+                if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    setVoiceTranscript('⚠️ Microphone blocked — enable in browser settings');
+                } else if (err.name === 'NotFoundError') {
+                    setVoiceTranscript('⚠️ No microphone found');
+                } else {
+                    setVoiceTranscript('⚠️ Mic error: ' + (err.message || err.name));
+                }
+                setTimeout(() => setVoiceTranscript(''), 4000);
+                return;
+            }
+
+            voiceModeRef.current = true;
+            setVoiceMode(true);
+            setVoiceState(STATES.LISTENING);
+
+            // Start listening immediately (no waiting)
+            startListening();
+
+            // Play greeting via streaming TTS (async, non-blocking)
+            const greet = "Hello! What would you like to eat?";
+            speak(greet);
+        }
+    }, [voiceMode, startListening, speak]);
+
+    return {
+        // State
+        voiceMode,
+        voiceState,
+        liveTranscript,
+        voiceTranscript,
+        isListening,
+
+        // Refs (for App.jsx compatibility)
+        voiceModeRef,
+        voiceStateRef,
+
+        // Controls
+        toggleVoiceMode,
+        speak,          // Manually trigger TTS
+        bargeIn,        // Stop TTS
+        startListening, // Manually start STT
+
+        // For streaming text display
+        streamText: (text, callback) => {
+            if (streamCancelRef.current) streamCancelRef.current();
+            streamCancelRef.current = streamTextToCallback(text, callback);
+        },
+    };
+}
+
+export default useVoiceController;

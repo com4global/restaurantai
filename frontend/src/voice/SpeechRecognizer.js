@@ -1,0 +1,179 @@
+/**
+ * SpeechRecognizer.js — Continuous browser speech recognition with debounce
+ * Features:
+ * - continuous = true (never cuts off mid-sentence)
+ * - interimResults = true (live transcript while speaking)
+ * - 2s silence debounce (sends when user finishes)
+ * - Auto-restart on errors
+ * - Barge-in detection
+ */
+
+const DEBOUNCE_MS = 1000; // 1 second of silence before sending (fast response)
+
+export class SpeechRecognizer {
+    constructor() {
+        this.recognition = null;
+        this.debounceTimer = null;
+        this.finalTranscript = '';
+        this.isListening = false;
+
+        // Callbacks
+        this.onLiveTranscript = null;  // (text) => void — live partial text
+        this.onFinalTranscript = null; // (text) => void — debounced final text
+        this.onStateChange = null;     // (state) => void — 'listening'|'idle'
+        this.onError = null;           // (error) => void
+        this.onSpeechDetected = null;  // () => void — for barge-in detection
+    }
+
+    /**
+     * Check if SpeechRecognition API is available
+     */
+    static isSupported() {
+        return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+    }
+
+    /**
+     * Start continuous listening
+     */
+    start() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) {
+            this.onError?.('Speech recognition not supported in this browser');
+            return false;
+        }
+
+        this.stop(); // Clean up any existing instance
+        this.finalTranscript = '';
+
+        const recognition = new SR();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        recognition.maxAlternatives = 1;
+        this.recognition = recognition;
+
+        recognition.onstart = () => {
+            this.isListening = true;
+            this.onStateChange?.('listening');
+        };
+
+        recognition.onresult = (event) => {
+            let interim = '';
+            let final = '';
+            let confidenceSum = 0;
+            let confidenceCount = 0;
+
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const transcript = event.results[i][0].transcript;
+                const conf = event.results[i][0].confidence || 0;
+                if (event.results[i].isFinal) {
+                    final += transcript;
+                    confidenceSum += conf;
+                    confidenceCount++;
+                } else {
+                    interim += transcript;
+                }
+            }
+
+            // Accumulate final results
+            if (final) {
+                this.finalTranscript = (this.finalTranscript + ' ' + final).trim();
+            }
+
+            // Track confidence (average across all final results)
+            if (confidenceCount > 0) {
+                this._lastConfidence = confidenceSum / confidenceCount;
+            }
+
+            // Persist latest interim text so debounce timer can access it
+            this._lastInterim = interim;
+
+            // Notify barge-in detection (any speech detected)
+            this.onSpeechDetected?.();
+
+            // Show live transcript
+            const display = (this.finalTranscript + ' ' + interim).trim();
+            this.onLiveTranscript?.(display);
+
+            // Reset debounce timer on every new result
+            clearTimeout(this.debounceTimer);
+            this.debounceTimer = setTimeout(() => {
+                const pending = this._lastInterim?.trim() || '';
+                const textToSend = (this.finalTranscript.trim() + (pending ? ' ' + pending : '')).trim();
+                const confidence = this._lastConfidence || 0;
+                if (textToSend) {
+                    this.finalTranscript = '';
+                    this._lastInterim = '';
+                    this._lastConfidence = 0;
+                    this.onLiveTranscript?.('');
+                    this.stop();
+                    this.onFinalTranscript?.(textToSend, confidence);
+                }
+            }, DEBOUNCE_MS);
+        };
+
+        recognition.onerror = (e) => {
+            this.isListening = false;
+            if (e.error === 'no-speech') {
+                // Auto-restart after no speech
+                setTimeout(() => this.start(), 500);
+            } else if (e.error === 'aborted') {
+                // Intentional, ignore
+            } else if (e.error === 'not-allowed') {
+                this.onError?.('Microphone blocked — enable in browser settings');
+                this.onStateChange?.('idle');
+            } else {
+                this.onError?.('Mic error: ' + e.error);
+                // Try to restart
+                setTimeout(() => this.start(), 1000);
+            }
+        };
+
+        recognition.onend = () => {
+            this.isListening = false;
+            // Auto-restart if not intentionally stopped
+            if (this.recognition === recognition) {
+                setTimeout(() => {
+                    if (this.recognition === recognition) {
+                        this.start();
+                    }
+                }, 300);
+            }
+        };
+
+        try {
+            recognition.start();
+            return true;
+        } catch (err) {
+            console.error('[SpeechRecognizer] Failed to start:', err);
+            this.onStateChange?.('idle');
+            return false;
+        }
+    }
+
+    /**
+     * Stop listening
+     */
+    stop() {
+        clearTimeout(this.debounceTimer);
+        this.isListening = false;
+        if (this.recognition) {
+            try { this.recognition.abort(); } catch { }
+            this.recognition = null;
+        }
+    }
+
+    /**
+     * Cleanup and destroy
+     */
+    destroy() {
+        this.stop();
+        this.onLiveTranscript = null;
+        this.onFinalTranscript = null;
+        this.onStateChange = null;
+        this.onError = null;
+        this.onSpeechDetected = null;
+    }
+}
+
+export default SpeechRecognizer;
