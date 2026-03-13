@@ -862,6 +862,34 @@ export default function App() {
               💰 Budget Optimizer
             </motion.button>
 
+            {/* Hero Video - See AI in Action */}
+            <motion.div className="hero-video-section"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 }}
+            >
+              <div className="hero-video-header">
+                <span className="hero-video-badge">🎬 NEW</span>
+                <span className="hero-video-title">See AI in Action</span>
+                <span className="hero-video-sub">Watch how RestaurantAI finds your perfect meal</span>
+              </div>
+              <div className="hero-video-wrapper">
+                <video
+                  className="hero-video"
+                  src="/hero-video.mp4"
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                  onClick={(e) => {
+                    const v = e.currentTarget;
+                    if (v.paused) { v.play(); } else { v.pause(); }
+                  }}
+                />
+                <div className="hero-video-play-hint">Tap to play/pause</div>
+              </div>
+            </motion.div>
+
             {/* All Restaurants Grid */}
             {restaurants.length > 0 && (
               <>
