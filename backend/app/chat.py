@@ -714,7 +714,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                             f"Welcome to {restaurant.name}!\n\n{cat.name} — {len(items)} items. Tap + to add or tell me what you want!",
                             restaurant_id=restaurant.id, category_id=cat.id, order_id=new_order_id,
                             categories=cats, items=items, cart_summary=cart,
-                            voice_prompt=f"In {cat.name} we have: {item_list}. Which item would you like to add?",
+                            voice_prompt=f"{cat.name}. Which one would you like?",
                         )
 
                 # Try fuzzy item search as fallback
@@ -983,7 +983,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
             category_id=cat_match.id,
             order_id=session.order_id,
             items=items,
-            voice_prompt=f"In {cat_match.name} we have: {item_list}. Which one would you like?",
+            voice_prompt=f"{cat_match.name}. Which one would you like?",
         )
 
     # Fuzzy category match failed — try LLM category matching
@@ -999,7 +999,7 @@ def process_message(db: Session, session: ChatSession, text: str) -> dict:
                 category_id=llm_cat.id,
                 order_id=session.order_id,
                 items=items,
-                voice_prompt=f"In {llm_cat.name} we have: {item_list}. Which one would you like?",
+                voice_prompt=f"{llm_cat.name}. Which one would you like?",
             )
 
     # --- Show menu / categories ---

@@ -846,6 +846,7 @@ def swap_meal(req: MealSwapRequest, db: Session = Depends(get_db)):
     )
 
 
+@app.get("/restaurants/{restaurant_id}/categories", response_model=list[schemas.MenuCategoryOut])
 def restaurant_categories(restaurant_id: int, db: Session = Depends(get_db)):
     return crud.list_categories(db, restaurant_id)
 
@@ -1710,6 +1711,83 @@ def create_checkout_session(
     return result
 
 
+@app.post("/checkout/verify")
+def verify_checkout_payment(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Verify a Stripe checkout session and confirm orders if paid.
+    Called by the frontend after Stripe redirects back with a session_id.
+    """
+    session_id = payload.get("session_id", "")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+
+    # Dev mode — orders already confirmed by _simulate_order_checkout
+    if session_id == "sim_dev":
+        orders = db.query(models.Order).filter(
+            models.Order.user_id == current_user.id,
+            models.Order.status != "pending",
+        ).order_by(models.Order.created_at.desc()).limit(5).all()
+        return {"ok": True, "status": "paid", "orders": [
+            {"order_id": o.id, "status": o.status, "total_cents": o.total_cents}
+            for o in orders
+        ]}
+
+    # Real Stripe — retrieve the session and verify
+    import stripe as stripe_lib
+    try:
+        session = stripe_lib.checkout.Session.retrieve(session_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid session: {str(e)}")
+
+    if session.payment_status != "paid":
+        return {"ok": False, "status": session.payment_status, "orders": []}
+
+    # Payment confirmed — update orders
+    metadata = session.get("metadata", {})
+    order_ids_str = metadata.get("order_ids", "")
+    order_ids = [int(x) for x in order_ids_str.split(",") if x]
+
+    confirmed = []
+    for oid in order_ids:
+        order = db.query(models.Order).filter(
+            models.Order.id == oid,
+            models.Order.user_id == current_user.id
+        ).first()
+        if order and order.status == "pending":
+            order.status = "confirmed"
+            confirmed.append({"order_id": order.id, "status": "confirmed", "total_cents": order.total_cents})
+
+            # Send notifications
+            rest = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first()
+            if rest:
+                items = []
+                for oi in order.items:
+                    mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
+                    items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+                try:
+                    _send_all_notifications(rest, order, items, current_user.email, db)
+                except Exception as e:
+                    print(f"[Notification] Failed for order {order.id}: {e}")
+        elif order:
+            confirmed.append({"order_id": order.id, "status": order.status, "total_cents": order.total_cents})
+    db.commit()
+
+    # Update payment record
+    payment_rec = db.query(models.Payment).filter(
+        models.Payment.stripe_checkout_session_id == session_id
+    ).first()
+    if payment_rec:
+        payment_rec.status = "completed"
+        payment_rec.stripe_payment_intent_id = session.get("payment_intent", "")
+        db.commit()
+
+    return {"ok": True, "status": "paid", "orders": confirmed}
+
+
+
 # --- Stripe Webhook ---
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
@@ -1829,16 +1907,54 @@ def import_menu_from_url(
     from urllib.parse import urljoin, urlparse
     import re
 
+    # Track domains blocked by Cloudflare to skip Playwright for subsequent URLs
+    cloudflare_blocked_domains = set()
+
     def _fetch_rendered(target_url: str) -> str:
         """Fetch a URL with full JS rendering + scrolling + category clicking."""
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(target_url).netloc
+
+        # Skip Playwright entirely for domains we know are Cloudflare-blocked
+        if domain in cloudflare_blocked_domains:
+            print(f"[MenuExtract] ⏭️ Skipping Playwright for {domain} (Cloudflare). Using Jina Reader.")
+            raise Exception("Cloudflare blocked (cached)")
+
         # --- Try Playwright first (clicks categories + scrolls for lazy content) ---
         try:
             from playwright.sync_api import sync_playwright
+            import time as _time
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page(viewport={"width": 1280, "height": 900})
-                page.goto(target_url, wait_until="networkidle", timeout=45000)
-                page.wait_for_timeout(8000)  # Extra wait for SPA frameworks to fetch API data and render
+                print(f"[MenuExtract] 🌐 Loading {target_url[:80]}...")
+                # Use domcontentloaded — networkidle NEVER fires for SPAs (they keep fetching)
+                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                # Smart wait: SPA pages (ToastTab etc.) render a shell first, then load data
+                # Reduced to 7s max — Cloudflare is detectable after 3-4s
+                prev_len = 0
+                stable_count = 0
+                for _wait in range(7):  # Max 7 seconds (was 20)
+                    page.wait_for_timeout(1000)
+                    curr_len = page.evaluate("document.body.innerText.length")
+                    print(f"[MenuExtract]   ... {_wait+1}s: {curr_len} chars")
+                    if _wait >= 3 and curr_len > 1000 and curr_len == prev_len:
+                        stable_count += 1
+                        if stable_count >= 2:
+                            break  # Content truly stabilized
+                    else:
+                        stable_count = 0
+                    prev_len = curr_len
+                
+                # Cloudflare/bot protection detection — bail early if blocked
+                page_title = page.title()
+                if 'just a moment' in page_title.lower() or curr_len < 500:
+                    print(f"[MenuExtract] ⚠️ Cloudflare/bot protection detected (title='{page_title}', {curr_len} chars). Falling back to Jina Reader.")
+                    cloudflare_blocked_domains.add(domain)  # Cache for subsequent URLs
+                    browser.close()
+                    raise Exception("Cloudflare blocked")
+                
+                print(f"[MenuExtract] ✅ Page loaded ({curr_len} chars of text)")
 
                 # Step 1: Scroll through to trigger initial lazy loading
                 prev_height = 0
@@ -2473,6 +2589,26 @@ def save_imported_menu(
 
     categories = payload.get("categories", [])
     created = {"categories": 0, "items": 0}
+
+    # Clear existing categories and items for this restaurant to prevent duplicates
+    existing_cats = db.query(models.MenuCategory).filter(
+        models.MenuCategory.restaurant_id == restaurant_id
+    ).all()
+    if existing_cats:
+        existing_cat_ids = [c.id for c in existing_cats]
+        # Nullify FK references in chat_sessions
+        db.query(models.ChatSession).filter(
+            models.ChatSession.category_id.in_(existing_cat_ids)
+        ).update({models.ChatSession.category_id: None}, synchronize_session=False)
+        # Delete old items
+        db.query(models.MenuItem).filter(
+            models.MenuItem.category_id.in_(existing_cat_ids)
+        ).delete(synchronize_session=False)
+        # Delete old categories
+        db.query(models.MenuCategory).filter(
+            models.MenuCategory.id.in_(existing_cat_ids)
+        ).delete(synchronize_session=False)
+        db.flush()
 
     for i, cat_data in enumerate(categories):
         cat = models.MenuCategory(

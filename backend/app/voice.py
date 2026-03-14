@@ -50,6 +50,8 @@ class TTSRequest(BaseModel):
 @router.post("/tts")
 async def text_to_speech(req: TTSRequest):
     """Convert text to speech using Sarvam Bulbul v3."""
+    import time
+    t0 = time.time()
     if not req.text.strip():
         raise HTTPException(400, "Text cannot be empty")
     if len(req.text) > 2500:
@@ -62,6 +64,8 @@ async def text_to_speech(req: TTSRequest):
             language=req.language,
             speaker=req.speaker,
         )
+        elapsed = (time.time() - t0) * 1000
+        print(f"[TTS] \u23f1 {elapsed:.0f}ms | text=\"{req.text[:60]}{'...' if len(req.text) > 60 else ''}\"")
         return result
     except RuntimeError as e:
         raise HTTPException(502, str(e))

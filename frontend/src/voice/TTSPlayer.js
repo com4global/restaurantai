@@ -7,7 +7,7 @@
 
 const DEFAULT_SPEAKER = 'kavya';
 const DEFAULT_LANG = 'en-IN';
-const AUDIO_BUFFER_MS = 200; // Buffer before playback to prevent glitches
+const AUDIO_BUFFER_MS = 50; // Minimal buffer before playback (reduced from 200ms for snappier response)
 
 /**
  * Clean text for TTS (remove markdown, emoji, etc.)

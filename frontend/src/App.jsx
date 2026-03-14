@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
 
@@ -199,6 +199,7 @@ export default function App() {
   const [showCartPanel, setShowCartPanel] = useState(false);
   const [checkingOut, setCheckingOut] = useState(false);
   const [checkoutDone, setCheckoutDone] = useState(null);
+  const [paymentToast, setPaymentToast] = useState(null); // { type: 'success'|'cancel', message: string }
 
   // Orders
   const [myOrders, setMyOrders] = useState([]);
@@ -266,6 +267,40 @@ export default function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Handle Stripe payment redirect URL params
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const payment = params.get('payment');
+    const sessionId = params.get('session_id');
+    if (!payment) return;
+
+    // Clean URL immediately so refresh doesn't re-trigger
+    window.history.replaceState({}, '', window.location.pathname);
+
+    if (payment === 'order_success') {
+      setTab('orders');
+      setOrdersTab('current');
+      setCartData(null);
+      setShowCartPanel(false);
+      setPaymentToast({ type: 'success', message: '✅ Payment successful! Your order has been confirmed.' });
+      setTimeout(() => setPaymentToast(null), 8000);
+
+      // Verify payment and confirm orders on the backend
+      const storedToken = token || localStorage.getItem('token');
+      if (storedToken && sessionId) {
+        verifyPayment(storedToken, sessionId)
+          .then(() => fetchMyOrders(storedToken))
+          .then(setMyOrders)
+          .catch(() => { });
+      } else if (storedToken) {
+        fetchMyOrders(storedToken).then(setMyOrders).catch(() => { });
+      }
+    } else if (payment === 'order_cancel') {
+      setPaymentToast({ type: 'cancel', message: '❌ Payment was cancelled. Your items are still in the cart.' });
+      setTimeout(() => setPaymentToast(null), 6000);
+    }
+  }, []); // Run once on mount
 
   // Fetch restaurants
   const fetchRestaurantsData = useCallback(async (lat, lng, r) => {
@@ -525,6 +560,10 @@ export default function App() {
         // This was previously fire-and-forget, causing the next call to use a stale session
         try {
           console.log(`%c[IntentRouter] 🏪 Selecting restaurant: #${matchedRest.slug}`, 'color: #00bbff; font-weight: bold');
+          // Pre-fetch TTS in parallel with backend call (we know the text ahead of time)
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
+          }
           const selectRes = await sendMessage(token, buildChatPayload(`#${matchedRest.slug}`, null));
           // Update session with the new restaurant's session
           if (selectRes.session_id) {
@@ -543,9 +582,6 @@ export default function App() {
               categories: selectRes.categories,
             }]);
             setStatus("Ready.");
-            if (fromVoice && voiceModeRef.current) {
-              voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
-            }
             return;
           }
 
@@ -554,6 +590,9 @@ export default function App() {
           const menuRes = await sendMessage(token, buildChatPayload('show menu'));
           if (menuRes.session_id) setSessionId(menuRes.session_id);
           if (menuRes.categories && menuRes.categories.length > 0) {
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
+            }
             setActiveCategories(menuRes.categories);
             setActiveCategoryName(null);
             setCurrentItems([]);
@@ -564,9 +603,6 @@ export default function App() {
               categories: menuRes.categories,
             }]);
             setStatus("Ready.");
-            if (fromVoice && voiceModeRef.current) {
-              voiceSpeakRef.current(`Welcome to ${matchedRest.name}. Pick a category.`);
-            }
             return;
           }
           // Still nothing — show reply from backend or generic message
@@ -724,6 +760,10 @@ export default function App() {
           if (matchedCat) {
             console.log(`%c[CategoryMatch] ✅ "${fromVoice ? cleanedText : trimmed}" → category "${matchedCat.name}" (id: ${matchedCat.id})`, 'color: #00ff88; font-weight: bold');
             setActiveCategoryName(matchedCat.name);
+            // Pre-fetch TTS in parallel with backend call (we know the text ahead of time)
+            if (fromVoice && voiceModeRef.current) {
+              voiceSpeakRef.current(`${matchedCat.name}. Which one would you like?`, true);
+            }
             try {
               const res = await sendMessage(token, buildChatPayload(`category:${matchedCat.id}`));
               setSessionId(res.session_id);
@@ -735,9 +775,6 @@ export default function App() {
                 items: res.items,
               }]);
               setStatus("Ready.");
-              if (fromVoice && voiceModeRef.current) {
-                voiceSpeakRef.current(`${matchedCat.name}. Which one would you like?`, true);
-              }
               return;
             } catch (err) {
               console.error('[CategoryMatch] ❌ Failed:', err);
@@ -795,6 +832,21 @@ export default function App() {
       } catch (err) { /* fall through to normal chat */ }
     }
 
+    // Guard: if no restaurant is selected, don't send freeform text to process_message
+    // (backend session may retain a stale restaurant_id from a previous interaction)
+    // BUT: allow #slug (restaurant selection), category:, add: commands through
+    //      because setSelectedRestaurant is async and hasn't updated yet when doSend runs
+    const trimmedForGuard = (fromVoice ? cleanedText : text.trim());
+    if (!selectedRestaurant && !trimmedForGuard.startsWith('#') && !trimmedForGuard.startsWith('category:') && !trimmedForGuard.startsWith('add:') && trimmedForGuard !== 'show menu') {
+      const msg = "Please pick a restaurant first! Go to the Home tab or type # to search.";
+      setMessages((p) => [...p, { role: "bot", content: msg }]);
+      setStatus("Ready.");
+      if (fromVoice && voiceModeRef.current) {
+        voiceSpeakRef.current("Please pick a restaurant first.", true);
+      }
+      return;
+    }
+
     try {
       const textToSend = fromVoice ? cleanedText : text.trim();
       console.log(`%c[Backend] 📤 process_message("${textToSend}")`, 'color: #bb88ff; font-weight: bold');
@@ -807,15 +859,21 @@ export default function App() {
         items: res.items || null,
       }]);
       if (res.categories && res.categories.length > 0) {
-        setActiveCategories(res.categories);
+        // Only update categories for responses without items (restaurant selection)
+        // Category-click responses include items — don't overwrite the sticky category bar
         if (!res.items || res.items.length === 0) {
+          setActiveCategories(res.categories);
           setActiveCategoryName(null);
           setCurrentItems([]);
         }
       }
       if (res.items && res.items.length > 0) {
         setCurrentItems(res.items);
-        setActiveCategoryName(text.trim());
+        // For category: commands, don't overwrite activeCategoryName
+        // (handleCategoryClick already set it to the actual category name)
+        if (!textToSend.startsWith('category:')) {
+          setActiveCategoryName(text.trim());
+        }
       }
       if (res.cart_summary) setCartData(res.cart_summary);
       if (text.trim().startsWith("add:")) {
@@ -870,11 +928,48 @@ export default function App() {
 
   // ===================== RESTAURANT SELECTION =====================
 
-  const selectRestaurant = (r) => {
+  const selectRestaurant = async (r) => {
     setSelectedRestaurant(r);
     setShowSuggestions(false);
     setTab("chat");
-    doSend(`#${r.slug}`);
+    setActiveCategories([]);
+    setActiveCategoryName(null);
+    setCurrentItems([]);
+    setStatus("Loading menu...");
+
+    const apiBase = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+
+    // Fire both in parallel: fast categories REST + session setup via process_message
+    const catPromise = fetch(`${apiBase}/restaurants/${r.id}/categories`)
+      .then(res => res.ok ? res.json() : [])
+      .catch(() => []);
+
+    const sessionPromise = token
+      ? sendMessage(token, buildChatPayload(`#${r.slug}`)).catch(() => null)
+      : Promise.resolve(null);
+
+    // Categories come back first (simple DB query)
+    const cats = await catPromise;
+    if (cats && cats.length > 0) {
+      setActiveCategories(cats);
+    }
+
+    // Session setup finishes second — use it for session ID and welcome message only
+    const sessionRes = await sessionPromise;
+    if (sessionRes) {
+      if (sessionRes.session_id) setSessionId(sessionRes.session_id);
+      // Show welcome message but DON'T override categories (pre-fetch is authoritative)
+      const welcomeText = sessionRes.reply || `Welcome to **${r.name}**! Pick a category or just tell me what you want.`;
+      setMessages((p) => [...p, { role: "bot", content: welcomeText }]);
+      // If pre-fetch returned nothing, fall back to backend categories
+      if ((!cats || cats.length === 0) && sessionRes.categories && sessionRes.categories.length > 0) {
+        setActiveCategories(sessionRes.categories);
+      }
+    } else {
+      // No token or backend error — still show categories from pre-fetch
+      setMessages((p) => [...p, { role: "bot", content: `Welcome to **${r.name}**! Pick a category or just tell me what you want.` }]);
+    }
+    setStatus("Ready.");
   };
 
   const handleInputChange = (e) => {
@@ -987,6 +1082,31 @@ export default function App() {
   return (
     <div className="app-shell">
       <div className="app-content">
+        {/* Payment Toast */}
+        <AnimatePresence>
+          {paymentToast && (
+            <motion.div
+              className={`payment-toast ${paymentToast.type}`}
+              initial={{ y: -60, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: -60, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              onClick={() => setPaymentToast(null)}
+              style={{
+                position: "fixed", top: 0, left: 0, right: 0, zIndex: 9999,
+                padding: "14px 20px", textAlign: "center", fontWeight: 600, fontSize: "15px",
+                cursor: "pointer",
+                background: paymentToast.type === "success"
+                  ? "linear-gradient(135deg, #00c853, #00e676)"
+                  : "linear-gradient(135deg, #ff9800, #ffc107)",
+                color: "#fff",
+                boxShadow: "0 4px 20px rgba(0,0,0,0.3)",
+              }}
+            >
+              {paymentToast.message}
+            </motion.div>
+          )}
+        </AnimatePresence>
         {/* ====== HOME TAB ====== */}
         {tab === "home" && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}>

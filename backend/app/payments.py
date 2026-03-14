@@ -295,8 +295,8 @@ def create_order_checkout(db: Session, user: models.User) -> dict:
                 "quantity": oi.quantity,
             })
 
-    if not stripe.api_key or stripe.api_key.startswith("sk_test_your"):
-        # Dev mode — simulate checkout
+    if not stripe.api_key or stripe.api_key.startswith("sk_test_your") or len(stripe.api_key) < 30:
+        # Dev mode — simulate checkout (fake or placeholder key)
         return _simulate_order_checkout(db, user, pending_orders, total_cents)
 
     session = stripe.checkout.Session.create(

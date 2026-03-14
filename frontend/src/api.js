@@ -122,11 +122,30 @@ export async function createRestaurant(token, payload) {
 }
 
 export async function importMenuFromUrl(token, url) {
-  return request("/owner/import-menu", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ url }),
-  });
+  // Menu extraction is slow (30-90s): Playwright rendering + AI extraction
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
+  try {
+    const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+    const resp = await fetch(`${API}/owner/import-menu`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ url }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(text || "Import failed");
+    }
+    return resp.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') {
+      throw new Error("Menu extraction timed out. The website may be too complex. Try a simpler menu page URL.");
+    }
+    throw err;
+  }
 }
 
 export async function extractMenuFromFile(token, restaurantId, file) {
@@ -315,6 +334,14 @@ export async function createCheckoutSession(token) {
   return request("/checkout/create-session", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function verifyPayment(token, sessionId) {
+  return request("/checkout/verify", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
   });
 }
 
