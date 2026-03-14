@@ -87,7 +87,6 @@ export function useVoiceController({ apiBase, doSendRef }) {
             streamCancelRef.current();
             streamCancelRef.current = null;
         }
-        window.speechSynthesis?.cancel();
         setVoiceState(STATES.LISTENING);
     }, []);
 
@@ -153,79 +152,38 @@ export function useVoiceController({ apiBase, doSendRef }) {
         recognizer.start();
     }, [handleFinalTranscript, bargeIn]);
 
-    // ---- Find best Indian English voice ----
-    const indianVoiceRef = useRef(null);
-    useEffect(() => {
-        const findIndianVoice = () => {
-            const voices = window.speechSynthesis?.getVoices() || [];
-            // Priority: en-IN female → en-IN any → hi-IN → en-US/en-GB as last resort
-            const enIN = voices.filter(v => v.lang === 'en-IN');
-            const enINFemale = enIN.find(v => v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('veena') || v.name.toLowerCase().includes('google'));
-            if (enINFemale) { indianVoiceRef.current = enINFemale; }
-            else if (enIN.length > 0) { indianVoiceRef.current = enIN[0]; }
-            else {
-                const hiIN = voices.find(v => v.lang?.startsWith('hi'));
-                if (hiIN) indianVoiceRef.current = hiIN;
-            }
-            if (indianVoiceRef.current) {
-                console.log(`%c[TTS] 🇮🇳 Voice: ${indianVoiceRef.current.name} (${indianVoiceRef.current.lang})`, 'color: #ff88ff; font-weight: bold');
-            }
-        };
-        findIndianVoice();
-        // Voices load async in some browsers
-        window.speechSynthesis?.addEventListener('voiceschanged', findIndianVoice);
-        return () => window.speechSynthesis?.removeEventListener('voiceschanged', findIndianVoice);
-    }, []);
-
-    // All responses use speechSynthesis for consistency and zero latency
+    // ---- Speak via Sarvam AI TTS (Bulbul v3, "kavya" speaker) ----
     const speak = useCallback((text) => {
         if (!voiceModeRef.current || !text) return;
 
         // Cancel any ongoing speech
-        window.speechSynthesis?.cancel();
-        ttsPlayerRef.current?.stop(); // Stop any lingering Sarvam audio
+        ttsPlayerRef.current?.stop();
 
-        const cleanText = text
-            .replace(/\*\*|__|~~|`/g, '')           // Remove markdown
-            .replace(/#{1,6}\s*/g, '')               // Remove headers
-            .replace(/[🎤🍽️😊👋🔥📦⚠️⏳🌶️🍕🍔🍟🍣🍛🍰☕🍺🥤💧🍳🥞🧀🫔🧃🍵🍷🍸🍩🍪🍨🥧🍫🍎🍄🌽🍅✨🎙️🔊✕•🛒]/g, '')
-            .replace(/\n+/g, '. ')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        if (!cleanText) {
-            setVoiceState(STATES.LISTENING);
-            startListening();
-            return;
-        }
-
-        console.log(`%c[TTS] 🔊 Speaking: "${cleanText.substring(0, 60)}${cleanText.length > 60 ? '...' : ''}"`, 'color: #ff88ff; font-weight: bold');
-
-        const utterance = new SpeechSynthesisUtterance(cleanText);
-        // Use Indian English voice if available
-        if (indianVoiceRef.current) {
-            utterance.voice = indianVoiceRef.current;
-            utterance.lang = indianVoiceRef.current.lang;
-        }
-        utterance.rate = 1.15;  // Slightly fast for snappy feel
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-
-        utterance.onend = () => {
-            if (voiceModeRef.current) {
-                setVoiceState(STATES.LISTENING);
-                startListening();
-            }
-        };
-        utterance.onerror = () => {
-            if (voiceModeRef.current) {
-                setVoiceState(STATES.LISTENING);
-                startListening();
-            }
-        };
+        console.log(`%c[TTS] 🔊 Speaking via Sarvam AI: "${(text || '').substring(0, 60)}${(text || '').length > 60 ? '...' : ''}"`, 'color: #ff88ff; font-weight: bold');
 
         setVoiceState(STATES.SPEAKING);
-        window.speechSynthesis.speak(utterance);
+
+        // Wire up TTSPlayer callbacks for this utterance
+        const player = ttsPlayerRef.current;
+        player.onComplete = () => {
+            if (voiceModeRef.current) {
+                setVoiceState(STATES.LISTENING);
+                startListening();
+            }
+        };
+        player.onStateChange = (state) => {
+            if (state === 'speaking') setVoiceState(STATES.SPEAKING);
+            else if (state === 'idle' && voiceModeRef.current) setVoiceState(STATES.LISTENING);
+        };
+
+        // TTSPlayer.speak handles text cleaning, sentence chunking, and streaming playback
+        player.speak(text).catch((err) => {
+            console.error('[TTS] Sarvam TTS error:', err);
+            if (voiceModeRef.current) {
+                setVoiceState(STATES.LISTENING);
+                startListening();
+            }
+        });
     }, [startListening]);
 
     // ---- Toggle voice mode ----
@@ -241,7 +199,6 @@ export function useVoiceController({ apiBase, doSendRef }) {
             recognizerRef.current?.stop();
             ttsPlayerRef.current?.stop();
             if (streamCancelRef.current) { streamCancelRef.current(); streamCancelRef.current = null; }
-            window.speechSynthesis?.cancel();
         } else {
             // === TURN ON ===
             // Pre-check mic permission
