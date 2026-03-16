@@ -314,15 +314,15 @@ export class SpeechRecognizer {
             this.isListening = true;
             this.onStateChange?.('listening');
             this.onLiveTranscript?.('🎤 Listening...');
-            vlog('MIC', 'MediaRecorder started (auto-stop in 6s)');
+            vlog('MIC', 'MediaRecorder started (auto-stop in 4s)');
 
-            // Auto-stop after 6 seconds (single utterance)
+            // Auto-stop after 4 seconds (single utterance — faster response)
             this._recorderTimeout = setTimeout(() => {
                 if (recorder.state === 'recording') {
                     vlog('MIC', 'Auto-stopping MediaRecorder after timeout');
                     recorder.stop();
                 }
-            }, 6000);
+            }, 4000);
 
             return true;
         } catch (err) {
