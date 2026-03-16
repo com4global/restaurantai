@@ -29,7 +29,7 @@ function splitIntoChunks(text) {
     const chunks = [];
     let buffer = '';
     for (const sentence of sentences) {
-        if (buffer.length + sentence.length < 150) {
+        if (buffer.length + sentence.length < 500) {
             buffer = buffer ? buffer + ' ' + sentence : sentence;
         } else {
             if (buffer) chunks.push(buffer.trim());
@@ -208,6 +208,7 @@ export class TTSPlayer {
                     const source = ctx.createBufferSource();
                     source.buffer = audioBuffer;
                     source.connect(ctx.destination);
+                    source.playbackRate.value = 1.1;  // Slightly faster speech
                     this._currentSource = source;
 
                     source.onended = () => {

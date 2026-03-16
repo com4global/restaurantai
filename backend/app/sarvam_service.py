@@ -96,7 +96,7 @@ def generate_speech(
         "model": "bulbul:v3",
         "speaker": speaker,
         "audio_format": "wav",
-        "sample_rate": 22050,
+        "sample_rate": 16000,
     }
 
     body = json.dumps(payload).encode()
