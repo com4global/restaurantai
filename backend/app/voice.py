@@ -17,25 +17,73 @@ from .db import get_db
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
+# ---------- STT Trace Log (in-memory, last 50 calls) ----------
+import time as _time
+from collections import deque
+_stt_log = deque(maxlen=50)
+
+
+@router.get("/stt-log")
+async def get_stt_log():
+    """Retrieve recent STT call logs for debugging."""
+    return {"logs": list(_stt_log), "count": len(_stt_log)}
+
 
 # ---------- STT ----------
 
 @router.post("/stt")
 async def speech_to_text(file: UploadFile = File(...)):
     """Transcribe uploaded audio using Sarvam Saaras v3."""
+    t0 = _time.time()
     audio_bytes = await file.read()
+    filename = file.filename or "audio.webm"
+    content_type = file.content_type or "unknown"
+    audio_kb = len(audio_bytes) / 1024
+
+    log_entry = {
+        "ts": _time.strftime("%H:%M:%S"),
+        "filename": filename,
+        "content_type": content_type,
+        "audio_kb": round(audio_kb, 1),
+        "transcript": None,
+        "language": None,
+        "duration_ms": None,
+        "error": None,
+    }
+
+    print(f"[STT] ← {audio_kb:.1f}KB | file={filename} | type={content_type}")
+
     if len(audio_bytes) == 0:
+        log_entry["error"] = "Empty audio"
+        _stt_log.append(log_entry)
         raise HTTPException(400, "Empty audio file")
-    if len(audio_bytes) > 10 * 1024 * 1024:  # 10MB max
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        log_entry["error"] = "Too large"
+        _stt_log.append(log_entry)
         raise HTTPException(400, "Audio file too large (max 10MB)")
 
     try:
         result = sarvam_service.transcribe_audio(
             audio_bytes,
-            filename=file.filename or "audio.webm",
+            filename=filename,
         )
+        elapsed = (_time.time() - t0) * 1000
+        transcript = result.get("transcript", "")
+        lang = result.get("language", "")
+
+        log_entry["transcript"] = transcript
+        log_entry["language"] = lang
+        log_entry["duration_ms"] = round(elapsed)
+
+        print(f"[STT] → \"{transcript}\" | lang={lang} | ⏱{elapsed:.0f}ms")
+        _stt_log.append(log_entry)
         return result
     except RuntimeError as e:
+        elapsed = (_time.time() - t0) * 1000
+        log_entry["error"] = str(e)[:200]
+        log_entry["duration_ms"] = round(elapsed)
+        print(f"[STT] ✗ {str(e)[:100]} | ⏱{elapsed:.0f}ms")
+        _stt_log.append(log_entry)
         raise HTTPException(502, str(e))
 
 
