@@ -44,6 +44,7 @@ class RestaurantOut(BaseModel):
     owner_id: int | None = None
     notification_email: str | None = None
     notification_phone: str | None = None
+    dine_in_enabled: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -60,6 +61,7 @@ class RestaurantCreate(BaseModel):
     phone: str | None = None
     notification_email: str | None = None
     notification_phone: str | None = None
+    dine_in_enabled: bool = False
 
 
 class RestaurantUpdate(BaseModel):
@@ -74,6 +76,7 @@ class RestaurantUpdate(BaseModel):
     is_active: bool | None = None
     notification_email: str | None = None
     notification_phone: str | None = None
+    dine_in_enabled: bool | None = None
 
 
 class CategoryCreate(BaseModel):
@@ -190,6 +193,8 @@ class OrderItemOut(BaseModel):
 class OrderOut(BaseModel):
     id: int
     status: str
+    order_type: str = "pickup"
+    table_number: str | None = None
     total_cents: int
     created_at: str
     customer_email: str | None = None

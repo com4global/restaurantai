@@ -15,6 +15,7 @@ import {
     createOwnerSubscription,
     getOwnerSubscription,
     getManageBillingUrl,
+    fetchQRCodes,
 } from "./api.js";
 import SalesAnalytics from "./SalesAnalytics.jsx";
 
@@ -804,6 +805,11 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                     <button className={`owner-tab-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab(r.id, "settings")}>
                                         ⚙️ Settings
                                     </button>
+                                    {r.dine_in_enabled && (
+                                        <button className={`owner-tab-btn ${tab === "qr" ? "active" : ""}`} onClick={() => setTab(r.id, "qr")}>
+                                            📱 QR Codes
+                                        </button>
+                                    )}
                                 </div>
 
                                 {/* ORDERS TAB */}
@@ -886,6 +892,8 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                         <div className="owner-order-meta">
                                                             <span>👤 {order.customer_email || "Guest"}</span>
                                                             <span>🕐 {new Date(order.created_at).toLocaleString()}</span>
+                                                            {order.order_type === 'dine_in' && <span className="dine-in-badge">🪑 Table {order.table_number}</span>}
+                                                            {order.order_type !== 'dine_in' && <span className="pickup-badge">📦 Pickup</span>}
                                                         </div>
                                                         <div className="owner-order-items">
                                                             {order.items.map((item, idx) => (
@@ -1201,6 +1209,34 @@ export default function OwnerPortal({ token, onBack, onTokenUpdate }) {
                                                 {saveStatus === "error" && <p className="extract-error">Failed to save. Try again.</p>}
                                             </div>
                                         )}
+                                    </div>
+                                )}
+
+                                {/* QR CODES TAB */}
+                                {tab === "qr" && r.dine_in_enabled && (
+                                    <div className="owner-qr-panel">
+                                        <h4>📱 QR Codes for Dine-In</h4>
+                                        <p className="owner-settings-desc">Generate and print QR codes for each table. Customers scan to view the menu and order directly.</p>
+                                        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginBottom: '1rem' }}>
+                                            <label>Tables: <input type="number" min="1" max="100" defaultValue="10" id={`qr-count-${r.id}`} style={{ width: 60, padding: '4px 8px', borderRadius: 6, border: '1px solid #444', background: '#1a1a2e', color: '#fff' }} /></label>
+                                            <button className="owner-primary-btn" onClick={async () => {
+                                                const count = parseInt(document.getElementById(`qr-count-${r.id}`)?.value || '10');
+                                                try {
+                                                    const data = await fetchQRCodes(token, r.id, count);
+                                                    const el = document.getElementById(`qr-results-${r.id}`);
+                                                    if (el) {
+                                                        el.innerHTML = data.tables.map(t => `
+                                                            <div class="qr-table-card">
+                                                                <img src="${t.qr_image_url}" alt="Table ${t.table_number}" />
+                                                                <div class="qr-table-label">Table ${t.table_number}</div>
+                                                                <a href="${t.qr_image_url}" download="table-${t.table_number}-qr.png" class="qr-download-link">⬇ Download</a>
+                                                            </div>
+                                                        `).join('');
+                                                    }
+                                                } catch (err) { alert('Failed to load QR codes: ' + err.message); }
+                                            }}>🔄 Generate QR Codes</button>
+                                        </div>
+                                        <div id={`qr-results-${r.id}`} className="qr-results-grid"></div>
                                     </div>
                                 )}
 

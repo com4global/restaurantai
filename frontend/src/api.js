@@ -345,6 +345,39 @@ export async function verifyPayment(token, sessionId) {
   });
 }
 
+// --- Order Tracking & Kitchen Queue ---
+
+export async function trackOrder(token, orderId) {
+  return request(`/orders/${orderId}/track`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getRestaurantQueue(restaurantId) {
+  return request(`/restaurant/${restaurantId}/queue`);
+}
+
+// --- QR Code Dine-In ---
+
+export async function fetchDineInRestaurant(slug, tableNumber) {
+  const params = tableNumber ? `?table=${encodeURIComponent(tableNumber)}` : "";
+  return request(`/dine-in/${slug}${params}`);
+}
+
+export async function placeDineInOrder(token, restaurantId, tableNumber, items) {
+  return request("/dine-in/order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ restaurant_id: restaurantId, table_number: tableNumber, items }),
+  });
+}
+
+export async function fetchQRCodes(token, restaurantId, tableCount = 10) {
+  return request(`/owner/restaurants/${restaurantId}/qr-codes?table_count=${tableCount}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // --- AI Budget Optimizer ---
 
 export async function mealOptimizer({ people, budgetCents, cuisine, restaurantId } = {}) {

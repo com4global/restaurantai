@@ -997,6 +997,9 @@ def create_restaurant(payload: schemas.RestaurantCreate, db: Session = Depends(g
         latitude=r_lat,
         longitude=r_lng,
         phone=payload.phone,
+        notification_email=payload.notification_email,
+        notification_phone=payload.notification_phone,
+        dine_in_enabled=payload.dine_in_enabled,
     )
     db.add(r)
     db.commit()
@@ -1239,6 +1242,8 @@ def _serialize_orders(db, orders):
         results.append({
             "id": o.id,
             "status": o.status,
+            "order_type": getattr(o, 'order_type', 'pickup'),
+            "table_number": getattr(o, 'table_number', None),
             "total_cents": o.total_cents,
             "created_at": o.created_at.isoformat(),
             "customer_email": users.get(o.user_id),
@@ -1373,6 +1378,8 @@ def owner_analytics(
 # --- Owner: Update order status ---
 @app.patch("/owner/orders/{order_id}/status")
 def update_order_status(order_id: int, payload: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    from datetime import datetime, timedelta
+
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -1387,9 +1394,291 @@ def update_order_status(order_id: int, payload: dict, db: Session = Depends(get_
     valid = ["accepted", "rejected", "preparing", "ready", "completed"]
     if new_status not in valid:
         raise HTTPException(status_code=400, detail=f"Status must be one of: {valid}")
+
+    now = datetime.utcnow()
     order.status = new_status
+    order.status_updated_at = now
+
+    # When preparing starts, set ETA
+    if new_status == "preparing":
+        prep_mins = rest.avg_prep_minutes or 20
+        order.estimated_ready_at = now + timedelta(minutes=prep_mins)
+
+    # When ready/completed, clear ETA and auto-adjust restaurant avg prep time
+    if new_status in ("ready", "completed"):
+        order.estimated_ready_at = None
+        # Calculate actual prep time and update rolling average
+        if order.status_updated_at:
+            # Find when "preparing" started by looking at recent history
+            # For simplicity, use time since last status change
+            pass  # Will be refined when we have status history
+
     db.commit()
-    return {"ok": True, "order_id": order_id, "status": new_status}
+    return {"ok": True, "order_id": order_id, "status": new_status,
+            "estimated_ready_at": order.estimated_ready_at.isoformat() if order.estimated_ready_at else None}
+
+
+# --- Customer: Track order progress ---
+@app.get("/orders/{order_id}/track")
+def track_order(order_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Get real-time tracking info for a customer's order."""
+    from datetime import datetime
+
+    order = db.query(models.Order).filter(
+        models.Order.id == order_id,
+        models.Order.user_id == current_user.id
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Queue position: count of orders ahead at same restaurant
+    active_statuses = ["confirmed", "accepted", "preparing"]
+    if order.status in active_statuses:
+        queue_position = db.query(models.Order).filter(
+            models.Order.restaurant_id == order.restaurant_id,
+            models.Order.status.in_(active_statuses),
+            models.Order.created_at < order.created_at,
+            models.Order.id != order.id,
+        ).count() + 1  # +1 for this order's position
+    else:
+        queue_position = 0
+
+    # Build progress steps
+    STATUS_STEPS = [
+        ("confirmed", "Order Confirmed"),
+        ("accepted", "Accepted"),
+        ("preparing", "Preparing"),
+        ("ready", "Ready for Pickup"),
+        ("completed", "Picked Up"),
+    ]
+    status_order = [s[0] for s in STATUS_STEPS]
+    current_idx = status_order.index(order.status) if order.status in status_order else -1
+
+    steps = []
+    for i, (status_key, label) in enumerate(STATUS_STEPS):
+        if i < current_idx:
+            step_status = "done"
+        elif i == current_idx:
+            step_status = "active"
+        else:
+            step_status = "upcoming"
+        steps.append({"name": label, "key": status_key, "status": step_status})
+
+    # ETA
+    now = datetime.utcnow()
+    eta_minutes = None
+    if order.estimated_ready_at and order.estimated_ready_at > now:
+        eta_minutes = int((order.estimated_ready_at - now).total_seconds() / 60)
+
+    # Elapsed since order placed
+    elapsed_minutes = int((now - order.created_at).total_seconds() / 60)
+
+    # Restaurant info
+    rest = db.query(models.Restaurant).filter(models.Restaurant.id == order.restaurant_id).first()
+
+    return {
+        "order_id": order.id,
+        "status": order.status,
+        "queue_position": queue_position,
+        "estimated_ready_at": order.estimated_ready_at.isoformat() if order.estimated_ready_at else None,
+        "eta_minutes": eta_minutes,
+        "elapsed_minutes": elapsed_minutes,
+        "steps": steps,
+        "restaurant_name": rest.name if rest else "Unknown",
+        "total_cents": order.total_cents,
+        "created_at": order.created_at.isoformat(),
+    }
+
+
+# --- Public: Restaurant kitchen queue info ---
+@app.get("/restaurant/{restaurant_id}/queue")
+def restaurant_queue(restaurant_id: int, db: Session = Depends(get_db)):
+    """Get current kitchen load for a restaurant (shown on restaurant cards)."""
+    rest = db.query(models.Restaurant).filter(models.Restaurant.id == restaurant_id).first()
+    if not rest:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    active_statuses = ["confirmed", "accepted", "preparing"]
+    active_count = db.query(models.Order).filter(
+        models.Order.restaurant_id == restaurant_id,
+        models.Order.status.in_(active_statuses),
+    ).count()
+
+    avg_wait = rest.avg_prep_minutes or 20
+    # Estimate total wait = avg_prep * ceil(active_orders / 2) (assuming 2 parallel orders)
+    estimated_wait = avg_wait * max(1, (active_count + 1) // 2) if active_count > 0 else 0
+
+    return {
+        "restaurant_id": restaurant_id,
+        "active_orders": active_count,
+        "avg_prep_minutes": avg_wait,
+        "estimated_wait_minutes": estimated_wait,
+    }
+
+
+# =============================================================
+# Phase 2: QR Code Dine-In Ordering
+# =============================================================
+
+@app.get("/dine-in/{restaurant_slug}")
+def dine_in_restaurant(restaurant_slug: str, table: str | None = None, db: Session = Depends(get_db)):
+    """Public endpoint: get restaurant info for dine-in QR page."""
+    rest = db.query(models.Restaurant).filter(models.Restaurant.slug == restaurant_slug).first()
+    if not rest:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    if not rest.dine_in_enabled:
+        raise HTTPException(status_code=404, detail="Dine-in is not enabled for this restaurant")
+
+    # Return restaurant info with categories and menu
+    categories = db.query(models.MenuCategory).filter(
+        models.MenuCategory.restaurant_id == rest.id
+    ).order_by(models.MenuCategory.sort_order).all()
+
+    cat_data = []
+    for cat in categories:
+        items = db.query(models.MenuItem).filter(
+            models.MenuItem.category_id == cat.id,
+            models.MenuItem.is_available == True,
+        ).all()
+        cat_data.append({
+            "id": cat.id,
+            "name": cat.name,
+            "items": [{
+                "id": item.id,
+                "name": item.name,
+                "description": item.description,
+                "price_cents": item.price_cents,
+            } for item in items],
+        })
+
+    return {
+        "restaurant_id": rest.id,
+        "restaurant_name": rest.name,
+        "slug": rest.slug,
+        "description": rest.description,
+        "dine_in_enabled": rest.dine_in_enabled,
+        "table_number": table,
+        "categories": cat_data,
+    }
+
+
+class DineInOrderItem(BaseModel):
+    item_id: int
+    quantity: int = 1
+
+class DineInOrderRequest(BaseModel):
+    restaurant_id: int
+    table_number: str
+    items: list[DineInOrderItem]
+
+
+@app.post("/dine-in/order")
+def place_dine_in_order(
+    payload: DineInOrderRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Place a dine-in order directly (skips cart/Stripe — payment at table)."""
+    rest = db.query(models.Restaurant).filter(
+        models.Restaurant.id == payload.restaurant_id
+    ).first()
+    if not rest:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    if not rest.dine_in_enabled:
+        raise HTTPException(status_code=400, detail="Dine-in is not enabled")
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="No items in order")
+
+    # Create dine-in order
+    order = models.Order(
+        user_id=current_user.id,
+        restaurant_id=payload.restaurant_id,
+        status="confirmed",
+        order_type="dine_in",
+        table_number=payload.table_number,
+        total_cents=0,
+    )
+    db.add(order)
+    db.flush()  # get order.id
+
+    total = 0
+    items_for_notification = []
+    for entry in payload.items:
+        mi = db.query(models.MenuItem).filter(models.MenuItem.id == entry.item_id).first()
+        if not mi:
+            continue
+        oi = models.OrderItem(
+            order_id=order.id,
+            menu_item_id=mi.id,
+            quantity=entry.quantity,
+            price_cents=mi.price_cents,
+        )
+        db.add(oi)
+        line_total = mi.price_cents * entry.quantity
+        total += line_total
+        items_for_notification.append({
+            "name": mi.name,
+            "quantity": entry.quantity,
+            "price_cents": mi.price_cents,
+        })
+
+    order.total_cents = total
+    db.commit()
+    db.refresh(order)
+
+    # Send notifications to owner
+    if rest:
+        try:
+            _send_all_notifications(rest, order, items_for_notification, current_user.email, db)
+        except Exception as e:
+            print(f"[Notification] Failed for dine-in order {order.id}: {e}")
+
+    return {
+        "ok": True,
+        "order_id": order.id,
+        "order_type": "dine_in",
+        "table_number": payload.table_number,
+        "total_cents": total,
+        "items": items_for_notification,
+    }
+
+
+@app.get("/owner/restaurants/{restaurant_id}/qr-codes")
+def get_qr_codes(
+    restaurant_id: int,
+    table_count: int = 10,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Generate QR code URLs for restaurant tables."""
+    rest = db.query(models.Restaurant).filter(
+        models.Restaurant.id == restaurant_id,
+        models.Restaurant.owner_id == current_user.id,
+    ).first()
+    if not rest:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+
+    # Base frontend URL (from CORS origins or default)
+    frontend_url = settings.cors_origins.split(",")[0].strip()
+
+    tables = []
+    for i in range(1, min(table_count, 100) + 1):
+        table_num = str(i)
+        dine_in_url = f"{frontend_url}/dine/{rest.slug}?table={table_num}"
+        # Use public QR code API for image generation
+        qr_image_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={urllib.parse.quote(dine_in_url)}"
+        tables.append({
+            "table_number": table_num,
+            "dine_in_url": dine_in_url,
+            "qr_image_url": qr_image_url,
+        })
+
+    return {
+        "restaurant_id": restaurant_id,
+        "restaurant_name": rest.name,
+        "dine_in_enabled": rest.dine_in_enabled,
+        "tables": tables,
+    }
 
 
 # --- Owner: Update notification settings ---
@@ -1412,7 +1701,9 @@ def _build_notification_message(restaurant, order, items, customer_email):
     """Build the notification text shared across all channels."""
     items_text = "\n".join([f"  • {i['name']} x{i['quantity']} — ${i['price_cents']/100:.2f}" for i in items])
     total = f"${order.total_cents/100:.2f}"
-    return f"""🔔 New Order #{order.id} — {restaurant.name}
+    order_type_label = "🍽️ Dine-In" if getattr(order, 'order_type', 'pickup') == 'dine_in' else "📦 Pickup"
+    table_info = f"\n🪑 Table: {order.table_number}" if getattr(order, 'table_number', None) else ""
+    return f"""🔔 New Order #{order.id} — {restaurant.name} ({order_type_label}){table_info}
 
 👤 Customer: {customer_email}
 💰 Total: {total}
@@ -1807,20 +2098,37 @@ def my_orders(db: Session = Depends(get_db), current_user=Depends(get_current_us
         models.Order.status != "pending"
     ).order_by(models.Order.created_at.desc()).limit(20).all()
     results = []
+    active_statuses = ["confirmed", "accepted", "preparing"]
     for o in orders:
-        rest = db.query(models.Restaurant).get(o.restaurant_id)
+        rest = db.query(models.Restaurant).filter(models.Restaurant.id == o.restaurant_id).first()
         items = []
         for oi in o.items:
-            mi = db.query(models.MenuItem).get(oi.menu_item_id)
+            mi = db.query(models.MenuItem).filter(models.MenuItem.id == oi.menu_item_id).first()
             items.append({"name": mi.name if mi else "?", "quantity": oi.quantity, "price_cents": oi.price_cents})
+
+        # Queue position for active orders
+        queue_position = 0
+        if o.status in active_statuses:
+            queue_position = db.query(models.Order).filter(
+                models.Order.restaurant_id == o.restaurant_id,
+                models.Order.status.in_(active_statuses),
+                models.Order.created_at < o.created_at,
+                models.Order.id != o.id,
+            ).count() + 1
+
         results.append({
             "id": o.id,
             "status": o.status,
+            "order_type": getattr(o, 'order_type', 'pickup'),
+            "table_number": getattr(o, 'table_number', None),
             "total_cents": o.total_cents,
             "created_at": o.created_at.isoformat(),
             "restaurant_name": rest.name if rest else "?",
             "restaurant_id": o.restaurant_id,
             "items": items,
+            "estimated_ready_at": o.estimated_ready_at.isoformat() if o.estimated_ready_at else None,
+            "status_updated_at": o.status_updated_at.isoformat() if o.status_updated_at else None,
+            "queue_position": queue_position,
         })
     return results
 

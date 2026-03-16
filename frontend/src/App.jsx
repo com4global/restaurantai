@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchDineInRestaurant, placeDineInOrder } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
 
@@ -246,6 +246,15 @@ export default function App() {
   const [optLoading, setOptLoading] = useState(false);
   const [optError, setOptError] = useState("");
 
+  // Dine-In Mode (Phase 2)
+  const [dineInMode, setDineInMode] = useState(false);
+  const [dineInRestaurant, setDineInRestaurant] = useState(null);
+  const [dineInTable, setDineInTable] = useState(null);
+  const [dineInCart, setDineInCart] = useState([]);
+  const [dineInPlacing, setDineInPlacing] = useState(false);
+  const [dineInDone, setDineInDone] = useState(null);
+  const [dineInCategory, setDineInCategory] = useState(null);
+
   // ===================== EFFECTS =====================
 
   useEffect(() => {
@@ -301,6 +310,27 @@ export default function App() {
       setTimeout(() => setPaymentToast(null), 6000);
     }
   }, []); // Run once on mount
+
+  // Detect dine-in URL: /dine/{slug}?table=N
+  useEffect(() => {
+    const path = window.location.pathname;
+    const match = path.match(/^\/dine\/([a-z0-9-]+)$/i);
+    if (!match) return;
+    const slug = match[1];
+    const params = new URLSearchParams(window.location.search);
+    const table = params.get('table');
+    fetchDineInRestaurant(slug, table)
+      .then(data => {
+        setDineInMode(true);
+        setDineInRestaurant(data);
+        setDineInTable(data.table_number || table || '1');
+        setTab('dine-in');
+      })
+      .catch(() => {
+        // Not a valid dine-in URL or dine-in disabled
+        window.history.replaceState({}, '', '/');
+      });
+  }, []);
 
   // Fetch restaurants
   const fetchRestaurantsData = useCallback(async (lat, lng, r) => {
@@ -1639,18 +1669,34 @@ export default function App() {
                         <div className="orders-section-title">In Progress</div>
                         {activeOrders.map((order) => {
                           const steps = ['confirmed', 'accepted', 'preparing', 'ready', 'completed'];
+                          const stepLabels = { confirmed: '📋 Ordered', accepted: '✅ Accepted', preparing: '🍳 Preparing', ready: '📦 Ready', completed: '🎉 Picked Up' };
                           const isRejected = order.status === 'rejected';
                           const currentStep = isRejected ? -1 : steps.indexOf(order.status);
+                          const etaMins = order.estimated_ready_at ? Math.max(0, Math.round((new Date(order.estimated_ready_at) - Date.now()) / 60000)) : null;
+                          const queuePos = order.queue_position || 0;
                           return (
                             <motion.div key={order.id} className={`order-card ${isRejected ? 'rejected' : ''}`}
                               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
                               <div className="order-card-header">
                                 <div>
                                   <div className="order-restaurant-name">🍽️ {order.restaurant_name}</div>
-                                  <div className="order-time">{new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                  <div className="order-time">
+                                    {new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    {order.order_type === 'dine_in' && <span className="dine-in-badge">🪑 Table {order.table_number}</span>}
+                                    {order.order_type === 'pickup' && <span className="pickup-badge">📦 Pickup</span>}
+                                  </div>
                                 </div>
                                 <div className="order-price">${(order.total_cents / 100).toFixed(2)}</div>
                               </div>
+
+                              {/* ETA & Queue Badge */}
+                              {!isRejected && (etaMins !== null || queuePos > 0) && (
+                                <div className="order-eta-bar">
+                                  {etaMins !== null && <div className="eta-countdown">⏱️ Ready in ~{etaMins} min</div>}
+                                  {queuePos > 0 && <div className="queue-badge">{queuePos === 1 ? '🔥 You\'re next!' : `📊 ${queuePos - 1} order${queuePos - 1 > 1 ? 's' : ''} ahead`}</div>}
+                                </div>
+                              )}
+
                               <div className="order-items-summary">
                                 {order.items.map((it) => `${it.quantity}x ${it.name}`).join(', ')}
                               </div>
@@ -1661,7 +1707,7 @@ export default function App() {
                                   {steps.map((s, i) => (
                                     <div key={s} className={`progress-step ${i <= currentStep ? 'active' : ''} ${i === currentStep ? 'current' : ''}`}>
                                       <div className="progress-dot" />
-                                      <span className="progress-label">{s === 'confirmed' ? 'Ordered' : s.charAt(0).toUpperCase() + s.slice(1)}</span>
+                                      <span className="progress-label">{stepLabels[s] || s}</span>
                                     </div>
                                   ))}
                                 </div>
@@ -1701,256 +1747,381 @@ export default function App() {
           </motion.div>
         )}
 
-        {/* ====== PROFILE TAB ====== */}
-        {tab === "profile" && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+        {/* ====== DINE-IN TAB ====== */}
+        {tab === "dine-in" && dineInMode && dineInRestaurant && (
+          <motion.div className="dine-in-page" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+            <div className="dine-in-banner">
+              <div className="dine-in-banner-name">🍽️ {dineInRestaurant.restaurant_name}</div>
+              <div className="dine-in-banner-table">🪑 Table {dineInTable}</div>
+            </div>
+
             {!token ? (
-              <div className="auth-page">
-                <div className="auth-logo">RestaurantAI</div>
-                <div className="auth-subtitle">{mode === "login" ? "Welcome back" : "Create your account"}</div>
-                <form className="auth-form" onSubmit={handleAuth}>
-                  <label>Email
-                    <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" />
-                  </label>
-                  <label>Password
-                    <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} placeholder="••••••••" />
-                  </label>
-                  <motion.button className="auth-submit" type="submit" whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}>
-                    {mode === "login" ? "Sign in" : "Create account"}
-                  </motion.button>
-                </form>
-                <button className="auth-switch" onClick={() => setMode(mode === "login" ? "register" : "login")}>
-                  {mode === "login" ? "Need an account? Sign up" : "Already have an account? Sign in"}
-                </button>
-                <button className="auth-switch" onClick={() => setShowOwnerPortal(true)} style={{ marginTop: 4, color: '#f59e0b' }}>
-                  🏪 Are you a restaurant owner?
-                </button>
-                {status !== "Ready." && <p className="auth-status">{status}</p>}
+              <div className="dine-in-auth">
+                <div className="orders-empty-emoji">🔐</div>
+                <div className="menu-empty-text">Sign in to place your dine-in order</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <input id="dine-in-email" placeholder="Email" className="auth-input" />
+                  <input id="dine-in-pass" type="password" placeholder="Password" className="auth-input" />
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button className="checkout-btn" onClick={async () => {
+                    const em = document.getElementById("dine-in-email")?.value;
+                    const pw = document.getElementById("dine-in-pass")?.value;
+                    if (!em || !pw) return;
+                    try {
+                      const data = await login({ email: em, password: pw });
+                      setToken(data.access_token);
+                    } catch {
+                      try {
+                        const data = await register({ email: em, password: pw });
+                        setToken(data.access_token);
+                      } catch (e2) { alert("Login failed: " + e2.message); }
+                    }
+                  }}>Sign In / Register</button>
+                </div>
+              </div>
+            ) : dineInDone ? (
+              <div className="dine-in-done">
+                <div className="orders-empty-emoji">✅</div>
+                <div className="menu-empty-text">Order #{dineInDone.order_id} placed!</div>
+                <div className="menu-empty-hint">Your food will be served at Table {dineInTable}.</div>
+                <div className="dine-in-done-total">${(dineInDone.total_cents / 100).toFixed(2)}</div>
+                <button className="checkout-btn" style={{ marginTop: 12 }} onClick={() => {
+                  setDineInDone(null); setDineInCart([]); setDineInCategory(null);
+                }}>Order More</button>
               </div>
             ) : (
-              <div className="profile-page">
-                <div className="profile-header">
-                  <div className="profile-avatar">👤</div>
-                  <div>
-                    <div className="profile-name">{email.split("@")[0]}</div>
-                    <div className="profile-email">{email}</div>
+              <>
+                {/* Category chips */}
+                <div className="dine-in-categories">
+                  {dineInRestaurant.categories.map(cat => (
+                    <button key={cat.id}
+                      className={`dine-in-cat-chip ${dineInCategory === cat.id ? "active" : ""}`}
+                      onClick={() => setDineInCategory(dineInCategory === cat.id ? null : cat.id)}>
+                      {cat.name}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Menu items */}
+                <div className="dine-in-menu">
+                  {dineInRestaurant.categories
+                    .filter(c => !dineInCategory || c.id === dineInCategory)
+                    .map(cat => (
+                      <div key={cat.id} className="dine-in-cat-section">
+                        <div className="dine-in-cat-title">{cat.name}</div>
+                        {cat.items.map(item => {
+                          const inCart = dineInCart.find(c => c.item_id === item.id);
+                          return (
+                            <div key={item.id} className="dine-in-item">
+                              <div className="dine-in-item-info">
+                                <div className="dine-in-item-name">{getFoodEmoji(item.name, cat.name)} {item.name}</div>
+                                {item.description && <div className="dine-in-item-desc">{item.description}</div>}
+                                <div className="dine-in-item-price">${(item.price_cents / 100).toFixed(2)}</div>
+                              </div>
+                              <div className="dine-in-item-actions">
+                                {inCart ? (
+                                  <div className="dine-in-qty">
+                                    <button onClick={() => setDineInCart(prev => {
+                                      return prev.map(c => c.item_id === item.id ? { ...c, quantity: c.quantity - 1 } : c).filter(c => c.quantity > 0);
+                                    })}>−</button>
+                                    <span>{inCart.quantity}</span>
+                                    <button onClick={() => setDineInCart(prev => prev.map(c => c.item_id === item.id ? { ...c, quantity: c.quantity + 1 } : c))}>+</button>
+                                  </div>
+                                ) : (
+                                  <button className="dine-in-add-btn" onClick={() => setDineInCart(prev => [...prev, { item_id: item.id, quantity: 1 }])}>
+                                    + Add
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                </div>
+
+                {/* Cart footer */}
+                {dineInCart.length > 0 && (
+                  <div className="dine-in-footer">
+                    <div className="dine-in-footer-info">
+                      <span>{dineInCart.reduce((s, c) => s + c.quantity, 0)} items</span>
+                      <span>${(dineInCart.reduce((s, c) => {
+                        const item = dineInRestaurant.categories.flatMap(cat => cat.items).find(i => i.id === c.item_id);
+                        return s + (item ? item.price_cents * c.quantity : 0);
+                      }, 0) / 100).toFixed(2)}</span>
+                    </div>
+                    <button className="dine-in-order-btn" disabled={dineInPlacing} onClick={async () => {
+                      setDineInPlacing(true);
+                      try {
+                        const result = await placeDineInOrder(token, dineInRestaurant.restaurant_id, dineInTable, dineInCart);
+                        setDineInDone(result);
+                        fetchMyOrders(token).then(setMyOrders).catch(() => {});
+                      } catch (err) {
+                        alert("Order failed: " + err.message);
+                      }
+                      setDineInPlacing(false);
+                    }}>
+                      {dineInPlacing ? "Placing..." : "🍽️ Place Dine-In Order"}
+                    </button>
                   </div>
-                </div>
-                <div className="profile-actions">
-                  <button className="profile-action-btn" onClick={() => setShowOwnerPortal(true)}>
-                    <span className="action-icon">🏪</span> Restaurant Owner Portal
-                  </button>
-                  <button className="profile-action-btn danger" onClick={handleLogout}>
-                    <span className="action-icon">🚪</span> Log out
-                  </button>
-                </div>
-              </div>
+                )}
+              </>
             )}
           </motion.div>
         )}
+
+        {/* ====== PROFILE TAB ====== */}
+        {tab === "profile" && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+
+  {!token ? (
+    <div className="auth-page">
+      <div className="auth-logo">RestaurantAI</div>
+      <div className="auth-subtitle">{mode === "login" ? "Welcome back" : "Create your account"}</div>
+      <form className="auth-form" onSubmit={handleAuth}>
+        <label>Email
+          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" />
+        </label>
+        <label>Password
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={6} placeholder="••••••••" />
+        </label>
+        <motion.button className="auth-submit" type="submit" whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}>
+          {mode === "login" ? "Sign in" : "Create account"}
+        </motion.button>
+      </form>
+      <button className="auth-switch" onClick={() => setMode(mode === "login" ? "register" : "login")}>
+        {mode === "login" ? "Need an account? Sign up" : "Already have an account? Sign in"}
+      </button>
+      <button className="auth-switch" onClick={() => setShowOwnerPortal(true)} style={{ marginTop: 4, color: '#f59e0b' }}>
+        🏪 Are you a restaurant owner?
+      </button>
+      {status !== "Ready." && <p className="auth-status">{status}</p>}
+    </div>
+  ) : (
+    <div className="profile-page">
+      <div className="profile-header">
+        <div className="profile-avatar">👤</div>
+        <div>
+          <div className="profile-name">{email.split("@")[0]}</div>
+          <div className="profile-email">{email}</div>
+        </div>
       </div>
-
-      {/* Cart Panel */}
-      <AnimatePresence>
-        {showCartPanel && cartData && cartData.restaurants && cartData.restaurants.length > 0 && (
-          <motion.div className="cart-panel" initial={{ y: 300 }} animate={{ y: 0 }} exit={{ y: 300 }} transition={{ type: "spring", damping: 25 }}>
-            <div className="cart-panel-header">
-              <span>🛒 Your Cart</span>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <button className="cart-clear-btn" onClick={async () => {
-                  try {
-                    const c = await clearCart(token);
-                    setCartData(c);
-                    if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
-                  } catch { }
-                }}>🗑 Clear All</button>
-                <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
-              </div>
-            </div>
-            <div className="cart-panel-body">
-              {cartData.restaurants.map((group) => (
-                <div key={group.restaurant_id} className="cart-restaurant-group">
-                  <div className="cart-restaurant-name">🍽️ {group.restaurant_name}</div>
-                  {group.items.map((item, i) => (
-                    <div key={item.order_item_id || i} className="cart-item-row">
-                      <span>{item.quantity}x {item.name}</span>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span>${(item.line_total_cents / 100).toFixed(2)}</span>
-                        <button className="cart-item-delete" onClick={async () => {
-                          try {
-                            const c = await removeCartItem(token, item.order_item_id);
-                            setCartData(c);
-                            if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
-                          } catch { }
-                        }}>✕</button>
-                      </div>
-                    </div>
-                  ))}
-                  <div className="cart-subtotal">Subtotal: ${(group.subtotal_cents / 100).toFixed(2)}</div>
-                </div>
-              ))}
-            </div>
-            <div className="cart-panel-footer">
-              <div className="cart-grand-total">Grand Total: ${cartTotal}</div>
-              <button className="cart-checkout-btn" disabled={checkingOut}
-                onClick={async () => {
-                  setCheckingOut(true);
-                  try {
-                    const res = await createCheckoutSession(token);
-                    if (res.checkout_url && res.session_id !== 'sim_dev') {
-                      // Redirect to Stripe Checkout
-                      window.location.href = res.checkout_url;
-                    } else {
-                      // Dev mode: orders confirmed directly
-                      setCartData(null); setShowCartPanel(false);
-                      setTab("orders"); setOrdersTab("current");
-                      setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 500);
-                      setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 2000);
-                      setTimeout(async () => {
-                        try { const c = await fetchCart(token); setCartData(c); } catch { }
-                        fetchMyOrders(token).then(setMyOrders).catch(() => { });
-                      }, 5000);
-                    }
-                  } catch (err) { alert(err.message || "Checkout failed"); }
-                  setCheckingOut(false);
-                }}>
-                {checkingOut ? "⏳ Processing Payment..." : "💳 Pay & Place Order"}
-              </button>
-            </div>
-          </motion.div>
+      <div className="profile-actions">
+        <button className="profile-action-btn" onClick={() => setShowOwnerPortal(true)}>
+          <span className="action-icon">🏪</span> Restaurant Owner Portal
+        </button>
+        <button className="profile-action-btn danger" onClick={handleLogout}>
+          <span className="action-icon">🚪</span> Log out
+        </button>
+      </div>
+    </div>
+  )}
+          </motion.div >
         )}
-      </AnimatePresence>
+      </div >
 
-      {/* Budget Optimizer Modal */}
-      <AnimatePresence>
-        {showOptimizer && (
-          <motion.div className="optimizer-overlay"
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            onClick={() => setShowOptimizer(false)}
-          >
-            <motion.div className="optimizer-modal"
-              initial={{ opacity: 0, y: 60, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 40, scale: 0.95 }}
-              transition={{ type: "spring", damping: 25, stiffness: 300 }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="optimizer-header">
-                <span className="optimizer-title">💰 AI Budget Optimizer</span>
-                <button className="optimizer-close" onClick={() => setShowOptimizer(false)}>✕</button>
-              </div>
-
-              <div className="optimizer-body">
-                <p className="optimizer-desc">Find the best meal combo for your group — powered by AI.</p>
-
-                <div className="optimizer-field">
-                  <label>👥 People to feed</label>
-                  <div className="optimizer-stepper">
-                    <button onClick={() => setOptPeople(Math.max(1, optPeople - 1))}>−</button>
-                    <span className="optimizer-stepper-value">{optPeople}</span>
-                    <button onClick={() => setOptPeople(Math.min(50, optPeople + 1))}>+</button>
-                  </div>
-                </div>
-
-                <div className="optimizer-field">
-                  <label>💵 Budget ($)</label>
-                  <input type="number" className="optimizer-input" min="1" max="1000"
-                    value={optBudget} onChange={(e) => setOptBudget(Number(e.target.value) || 0)} />
-                </div>
-
-                <div className="optimizer-field">
-                  <label>🍽️ Cuisine (optional)</label>
-                  <select className="optimizer-input" value={optCuisine} onChange={(e) => setOptCuisine(e.target.value)}>
-                    <option value="">Any cuisine</option>
-                    <option value="Indian">Indian</option>
-                    <option value="Italian">Italian</option>
-                    <option value="Chinese">Chinese</option>
-                    <option value="Mexican">Mexican</option>
-                    <option value="Thai">Thai</option>
-                    <option value="Japanese">Japanese</option>
-                    <option value="American">American</option>
-                  </select>
-                </div>
-
-                <motion.button className="optimizer-find-btn"
-                  disabled={optLoading || optBudget < 1 || optPeople < 1}
-                  whileTap={{ scale: 0.97 }}
-                  onClick={async () => {
-                    setOptLoading(true); setOptError(""); setOptResults(null);
+  {/* Cart Panel */ }
+  < AnimatePresence >
+  { showCartPanel && cartData && cartData.restaurants && cartData.restaurants.length > 0 && (
+    <motion.div className="cart-panel" initial={{ y: 300 }} animate={{ y: 0 }} exit={{ y: 300 }} transition={{ type: "spring", damping: 25 }}>
+      <div className="cart-panel-header">
+        <span>🛒 Your Cart</span>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button className="cart-clear-btn" onClick={async () => {
+            try {
+              const c = await clearCart(token);
+              setCartData(c);
+              if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
+            } catch { }
+          }}>🗑 Clear All</button>
+          <button className="cart-panel-close" onClick={() => setShowCartPanel(false)}>✕</button>
+        </div>
+      </div>
+      <div className="cart-panel-body">
+        {cartData.restaurants.map((group) => (
+          <div key={group.restaurant_id} className="cart-restaurant-group">
+            <div className="cart-restaurant-name">🍽️ {group.restaurant_name}</div>
+            {group.items.map((item, i) => (
+              <div key={item.order_item_id || i} className="cart-item-row">
+                <span>{item.quantity}x {item.name}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>${(item.line_total_cents / 100).toFixed(2)}</span>
+                  <button className="cart-item-delete" onClick={async () => {
                     try {
-                      const res = await mealOptimizer({
-                        people: optPeople,
-                        budgetCents: optBudget * 100,
-                        cuisine: optCuisine || undefined,
-                      });
-                      setOptResults(res);
-                      if (!res.combos || res.combos.length === 0) {
-                        setOptError("No combos found. Try a higher budget or fewer people.");
-                      }
-                    } catch (err) {
-                      setOptError(err.message || "Optimizer failed");
-                    }
-                    setOptLoading(false);
-                  }}
+                      const c = await removeCartItem(token, item.order_item_id);
+                      setCartData(c);
+                      if (!c.restaurants || c.restaurants.length === 0) setShowCartPanel(false);
+                    } catch { }
+                  }}>✕</button>
+                </div>
+              </div>
+            ))}
+            <div className="cart-subtotal">Subtotal: ${(group.subtotal_cents / 100).toFixed(2)}</div>
+          </div>
+        ))}
+      </div>
+      <div className="cart-panel-footer">
+        <div className="cart-grand-total">Grand Total: ${cartTotal}</div>
+        <button className="cart-checkout-btn" disabled={checkingOut}
+          onClick={async () => {
+            setCheckingOut(true);
+            try {
+              const res = await createCheckoutSession(token);
+              if (res.checkout_url && res.session_id !== 'sim_dev') {
+                // Redirect to Stripe Checkout
+                window.location.href = res.checkout_url;
+              } else {
+                // Dev mode: orders confirmed directly
+                setCartData(null); setShowCartPanel(false);
+                setTab("orders"); setOrdersTab("current");
+                setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 500);
+                setTimeout(() => { fetchMyOrders(token).then(setMyOrders).catch(() => { }); }, 2000);
+                setTimeout(async () => {
+                  try { const c = await fetchCart(token); setCartData(c); } catch { }
+                  fetchMyOrders(token).then(setMyOrders).catch(() => { });
+                }, 5000);
+              }
+            } catch (err) { alert(err.message || "Checkout failed"); }
+            setCheckingOut(false);
+          }}>
+          {checkingOut ? "⏳ Processing Payment..." : "💳 Pay & Place Order"}
+        </button>
+      </div>
+    </motion.div>
+  )}
+      </AnimatePresence >
+
+  {/* Budget Optimizer Modal */ }
+  < AnimatePresence >
+  { showOptimizer && (
+    <motion.div className="optimizer-overlay"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      onClick={() => setShowOptimizer(false)}
+    >
+      <motion.div className="optimizer-modal"
+        initial={{ opacity: 0, y: 60, scale: 0.95 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 40, scale: 0.95 }}
+        transition={{ type: "spring", damping: 25, stiffness: 300 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="optimizer-header">
+          <span className="optimizer-title">💰 AI Budget Optimizer</span>
+          <button className="optimizer-close" onClick={() => setShowOptimizer(false)}>✕</button>
+        </div>
+
+        <div className="optimizer-body">
+          <p className="optimizer-desc">Find the best meal combo for your group — powered by AI.</p>
+
+          <div className="optimizer-field">
+            <label>👥 People to feed</label>
+            <div className="optimizer-stepper">
+              <button onClick={() => setOptPeople(Math.max(1, optPeople - 1))}>−</button>
+              <span className="optimizer-stepper-value">{optPeople}</span>
+              <button onClick={() => setOptPeople(Math.min(50, optPeople + 1))}>+</button>
+            </div>
+          </div>
+
+          <div className="optimizer-field">
+            <label>💵 Budget ($)</label>
+            <input type="number" className="optimizer-input" min="1" max="1000"
+              value={optBudget} onChange={(e) => setOptBudget(Number(e.target.value) || 0)} />
+          </div>
+
+          <div className="optimizer-field">
+            <label>🍽️ Cuisine (optional)</label>
+            <select className="optimizer-input" value={optCuisine} onChange={(e) => setOptCuisine(e.target.value)}>
+              <option value="">Any cuisine</option>
+              <option value="Indian">Indian</option>
+              <option value="Italian">Italian</option>
+              <option value="Chinese">Chinese</option>
+              <option value="Mexican">Mexican</option>
+              <option value="Thai">Thai</option>
+              <option value="Japanese">Japanese</option>
+              <option value="American">American</option>
+            </select>
+          </div>
+
+          <motion.button className="optimizer-find-btn"
+            disabled={optLoading || optBudget < 1 || optPeople < 1}
+            whileTap={{ scale: 0.97 }}
+            onClick={async () => {
+              setOptLoading(true); setOptError(""); setOptResults(null);
+              try {
+                const res = await mealOptimizer({
+                  people: optPeople,
+                  budgetCents: optBudget * 100,
+                  cuisine: optCuisine || undefined,
+                });
+                setOptResults(res);
+                if (!res.combos || res.combos.length === 0) {
+                  setOptError("No combos found. Try a higher budget or fewer people.");
+                }
+              } catch (err) {
+                setOptError(err.message || "Optimizer failed");
+              }
+              setOptLoading(false);
+            }}
+          >
+            {optLoading ? "⏳ Finding best combos..." : "🔍 Find Best Combo"}
+          </motion.button>
+
+          {optError && <div className="optimizer-error">{optError}</div>}
+
+          {/* Results */}
+          {optResults && optResults.combos && optResults.combos.length > 0 && (
+            <div className="optimizer-results">
+              {optResults.combos.map((combo, ci) => (
+                <motion.div key={ci} className="optimizer-combo-card"
+                  initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: ci * 0.1 }}
                 >
-                  {optLoading ? "⏳ Finding best combos..." : "🔍 Find Best Combo"}
-                </motion.button>
-
-                {optError && <div className="optimizer-error">{optError}</div>}
-
-                {/* Results */}
-                {optResults && optResults.combos && optResults.combos.length > 0 && (
-                  <div className="optimizer-results">
-                    {optResults.combos.map((combo, ci) => (
-                      <motion.div key={ci} className="optimizer-combo-card"
-                        initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: ci * 0.1 }}
-                      >
-                        <div className="combo-header">
-                          <span className="combo-rank">{ci === 0 ? '🏆' : ci === 1 ? '🥈' : '🥉'}</span>
-                          <span className="combo-restaurant">{combo.restaurant_name}</span>
-                          <span className="combo-score">Score: {combo.score.toFixed(1)}</span>
-                        </div>
-                        <div className="combo-items">
-                          {combo.items.map((item, ii) => (
-                            <div key={ii} className="combo-item-row">
-                              <span>{getFoodEmoji(item.name)} {item.quantity}x {item.name}</span>
-                              <span className="combo-item-price">${(item.price_cents * item.quantity / 100).toFixed(2)}</span>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="combo-footer">
-                          <div className="combo-stats">
-                            <span className="combo-total">Total: ${(combo.total_cents / 100).toFixed(2)}</span>
-                            <span className="combo-feeds">Feeds {combo.feeds_people} people</span>
-                          </div>
-                          <button className="combo-order-btn" onClick={async () => {
-                            setShowOptimizer(false);
-                            // Add all items to cart in one shot via direct API
-                            try {
-                              const cartItems = combo.items.map(i => ({ item_id: i.item_id, quantity: i.quantity }));
-                              const cart = await addComboToCart(token, combo.restaurant_id, cartItems);
-                              setCartData(cart);
-                              setShowCartPanel(true);
-                            } catch (e) {
-                              console.error('Failed to add items to cart:', e);
-                            }
-                          }}>
-                            🛒 Order This
-                          </button>
-                        </div>
-                      </motion.div>
+                  <div className="combo-header">
+                    <span className="combo-rank">{ci === 0 ? '🏆' : ci === 1 ? '🥈' : '🥉'}</span>
+                    <span className="combo-restaurant">{combo.restaurant_name}</span>
+                    <span className="combo-score">Score: {combo.score.toFixed(1)}</span>
+                  </div>
+                  <div className="combo-items">
+                    {combo.items.map((item, ii) => (
+                      <div key={ii} className="combo-item-row">
+                        <span>{getFoodEmoji(item.name)} {item.quantity}x {item.name}</span>
+                        <span className="combo-item-price">${(item.price_cents * item.quantity / 100).toFixed(2)}</span>
+                      </div>
                     ))}
                   </div>
-                )}
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+                  <div className="combo-footer">
+                    <div className="combo-stats">
+                      <span className="combo-total">Total: ${(combo.total_cents / 100).toFixed(2)}</span>
+                      <span className="combo-feeds">Feeds {combo.feeds_people} people</span>
+                    </div>
+                    <button className="combo-order-btn" onClick={async () => {
+                      setShowOptimizer(false);
+                      // Add all items to cart in one shot via direct API
+                      try {
+                        const cartItems = combo.items.map(i => ({ item_id: i.item_id, quantity: i.quantity }));
+                        const cart = await addComboToCart(token, combo.restaurant_id, cartItems);
+                        setCartData(cart);
+                        setShowCartPanel(true);
+                      } catch (e) {
+                        console.error('Failed to add items to cart:', e);
+                      }
+                    }}>
+                      🛒 Order This
+                    </button>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+      </motion.div>
+    </motion.div>
+  )}
+      </AnimatePresence >
 
-      {/* Bottom Nav */}
-      <nav className="bottom-nav">
+  {/* Bottom Nav */ }
+  < nav className = "bottom-nav" >
         <button className={`nav-item ${tab === "home" ? "active" : ""}`} onClick={() => setTab("home")}>
           <span className="nav-icon">🏠</span>
           <span>Home</span>
@@ -1969,7 +2140,7 @@ export default function App() {
           <span className="nav-icon">👤</span>
           <span>Profile</span>
         </button>
-      </nav>
-    </div>
+      </nav >
+    </div >
   );
 }
