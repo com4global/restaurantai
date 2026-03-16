@@ -354,6 +354,7 @@ export class SpeechRecognizer {
                 // Send to backend STT
                 const formData = new FormData();
                 formData.append('file', blob, fileExt);
+                formData.append('language', this.lang || 'en-IN');
 
                 try {
                     const resp = await fetch(`${this.apiBase}/api/voice/stt`, {

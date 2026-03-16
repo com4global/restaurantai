@@ -32,7 +32,7 @@ async def get_stt_log():
 # ---------- STT ----------
 
 @router.post("/stt")
-async def speech_to_text(file: UploadFile = File(...)):
+async def speech_to_text(file: UploadFile = File(...), language: str = Form("en-IN")):
     """Transcribe uploaded audio using Sarvam Saaras v3."""
     t0 = _time.time()
     audio_bytes = await file.read()
@@ -66,6 +66,7 @@ async def speech_to_text(file: UploadFile = File(...)):
         result = sarvam_service.transcribe_audio(
             audio_bytes,
             filename=filename,
+            language_code=language,
         )
         elapsed = (_time.time() - t0) * 1000
         transcript = result.get("transcript", "")

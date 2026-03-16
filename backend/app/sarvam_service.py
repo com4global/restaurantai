@@ -18,7 +18,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
 SARVAM_BASE = "https://api.sarvam.ai"
 
 
-def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> dict:
+def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm", language_code: str = "en-IN") -> dict:
     """
     Send audio to Sarvam Saaras v3 STT.
     Returns {"transcript": str, "language": str}
@@ -46,6 +46,10 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> dict:
     body += f"--{boundary}\r\n".encode()
     body += b'Content-Disposition: form-data; name="model"\r\n\r\n'
     body += b"saaras:v3\r\n"
+    # Language code field — CRITICAL: prevents wrong language detection
+    body += f"--{boundary}\r\n".encode()
+    body += b'Content-Disposition: form-data; name="language_code"\r\n\r\n'
+    body += f"{language_code}\r\n".encode()
     # Mode field
     body += f"--{boundary}\r\n".encode()
     body += b'Content-Disposition: form-data; name="mode"\r\n\r\n'
