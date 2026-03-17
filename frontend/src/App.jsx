@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchDineInRestaurant, placeDineInOrder } from "./api.js";
+import { listRestaurants, fetchNearby, login, register, sendMessage, fetchCart, addComboToCart, removeCartItem, clearCart, checkout, fetchMyOrders, voiceSTT, voiceTTS, voiceChat, createCheckoutSession, verifyPayment, trackOrder, getRestaurantQueue, mealOptimizer, searchMenuItems, fetchPopularItems, searchByIntent, generateMealPlan, swapMeal, fetchDineInRestaurant, placeDineInOrder, multiOrder } from "./api.js";
 import OwnerPortal from "./OwnerPortal.jsx";
 import { useVoiceController } from "./voice/useVoiceController.js";
 
@@ -705,6 +705,47 @@ export default function App() {
         } catch {
           setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble updating the search. Try again!" }]);
           setStatus("Ready.");
+        }
+        return;
+      }
+
+      // ── MULTI-RESTAURANT ORDER ─────────────────────────────
+      if (intentResult.intent === INTENTS.MULTI_ORDER) {
+        if (!token) {
+          setMessages((p) => [...p, { role: "bot", content: "Please sign in to place a multi-restaurant order." }]);
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Please sign in first to place orders.", true);
+          return;
+        }
+        // Clear restaurant context — multi-order spans multiple restaurants
+        setSelectedRestaurant(null);
+        setActiveCategories([]);
+        setActiveCategoryName(null);
+        setCurrentItems([]);
+        setStatus("Processing multi-order...");
+        try {
+          const result = await multiOrder(token, trimmed);
+          // Replace welcome messages with just the multi-order summary
+          setMessages((p) => {
+            // Filter out any prior "Welcome to" messages from this session to keep it clean
+            const cleaned = p.filter(m => !(m.role === "bot" && /^Welcome to\b/i.test(m.content)));
+            return [...cleaned, { role: "bot", content: result.summary_text || "Order processed!" }];
+          });
+          setStatus("Ready.");
+          if (result.added && result.added.length > 0) {
+            setShowCartPanel(true);
+          }
+          if (fromVoice && voiceModeRef.current) {
+            voiceSpeakRef.current(result.voice_prompt || "Order processed.", true);
+          }
+        } catch (err) {
+          if (err.status === 401) {
+            setToken(null); setMessages((p) => [...p, { role: "bot", content: "Session expired. Please sign in again." }]);
+          } else {
+            setMessages((p) => [...p, { role: "bot", content: "Sorry, I had trouble processing that order. Try again!" }]);
+          }
+          setStatus("Ready.");
+          if (fromVoice && voiceModeRef.current) voiceSpeakRef.current("Sorry, I couldn't process that order.", true);
         }
         return;
       }

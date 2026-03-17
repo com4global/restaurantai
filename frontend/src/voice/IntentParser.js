@@ -40,6 +40,7 @@ export const INTENTS = {
     GOODBYE: 'GOODBYE',               // "bye"
     MEAL_PLAN: 'MEAL_PLAN',            // "plan meals for the week"
     SHOW_CART: 'SHOW_CART',            // "what's in my cart", "show cart"
+    MULTI_ORDER: 'MULTI_ORDER',        // "1 biryani from spice garden and 2 naan from aroma"
     UNCLEAR: 'UNCLEAR',               // Can't classify
 };
 
@@ -168,6 +169,14 @@ export function parseIntent(text, convState = {}, restaurants = []) {
     // ─── 5. Remove item ──────────────────────────────────────────
     if (REMOVE_PATTERNS.some(p => p.test(t))) {
         result.intent = INTENTS.REMOVE_ITEM;
+        result.parseTimeMs = performance.now() - start;
+        return result;
+    }
+
+    // ─── 5.5 Multi-restaurant order ─────────────────────────────
+    // Detect: "X from A and Y from B" patterns (multiple from clauses)
+    if (isMultiOrder(t)) {
+        result.intent = INTENTS.MULTI_ORDER;
         result.parseTimeMs = performance.now() - start;
         return result;
     }
@@ -372,6 +381,27 @@ function fuzzyMatchRestaurant(name, restaurants) {
         || (r.slug || '').toLowerCase().includes(lower)
     );
     return match || null;
+}
+
+/**
+ * Detect if input is a multi-restaurant order.
+ * Matches patterns like:
+ *   "1 butter masala from aroma and 2 chicken biryani from desi district"
+ *   "order pizza from dominos, biryani from spice garden"
+ *   "i want naan from aroma and samosa from spice garden"
+ */
+export function isMultiOrder(text) {
+    const t = text.toLowerCase().trim();
+    // Count "from X" clauses — if 2+, it's a multi-order
+    const fromMatches = t.match(/(?:from|at)\s+\w+/gi);
+    if (fromMatches && fromMatches.length >= 2) return true;
+
+    // Also catch: "N item from X and N item from Y" with separator
+    if (/\d*\s*\w+.*?\s+(?:from|at)\s+\w+.*?(?:and|,)\s*\d*\s*\w+.*?\s+(?:from|at)\s+\w+/i.test(t)) {
+        return true;
+    }
+
+    return false;
 }
 
 /**

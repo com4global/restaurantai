@@ -75,6 +75,25 @@ def meal_optimizer(
     )
 
 
+# --- Multi-Restaurant Natural Language Ordering ---
+class MultiOrderTextRequest(BaseModel):
+    text: str
+
+
+@app.post("/multi-order")
+def multi_order(
+    payload: MultiOrderTextRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Process a natural language multi-restaurant order.
+    E.g. "1 butter masala from aroma and 2 chicken biryani from desi district"
+    """
+    from .multi_order import process_multi_order
+    return process_multi_order(db, current_user.id, payload.text)
+
+
 # --- Multi-restaurant cart helper ---
 def _build_cart_summary(db: Session, user_id: int) -> dict:
     """Build grouped cart data across all pending orders for a user."""

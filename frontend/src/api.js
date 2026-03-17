@@ -390,3 +390,14 @@ export async function mealOptimizer({ people, budgetCents, cuisine, restaurantId
     body: JSON.stringify(body),
   });
 }
+
+export async function multiOrder(token, text) {
+  return request("/multi-order", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ text }),
+  });
+}
