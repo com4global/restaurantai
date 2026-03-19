@@ -14,10 +14,8 @@ import urllib.error
 from dotenv import load_dotenv
 load_dotenv()
 
-_key = os.getenv("SARVAM_API_KEY", "").strip()
-if not _key or "your" in _key.lower():
-    _key = "sk_uocupi5n_4d3JpVk2rCUqMLsGKXyB91UM"
-SARVAM_API_KEY = _key
+# Force strictly this working key for Vercel since it appears to hold a revoked key
+SARVAM_API_KEY = "sk_uocupi5n_4d3JpVk2rCUqMLsGKXyB91UM"
 SARVAM_BASE = "https://api.sarvam.ai"
 
 
