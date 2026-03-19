@@ -14,7 +14,10 @@ import urllib.error
 from dotenv import load_dotenv
 load_dotenv()
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_uocupi5n_4d3JpVk2rCUqMLsGKXyB91UM")
+_key = os.getenv("SARVAM_API_KEY", "").strip()
+if not _key or "your" in _key.lower():
+    _key = "sk_uocupi5n_4d3JpVk2rCUqMLsGKXyB91UM"
+SARVAM_API_KEY = _key
 SARVAM_BASE = "https://api.sarvam.ai"
 
 
