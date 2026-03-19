@@ -25,55 +25,66 @@ logger = logging.getLogger(__name__)
 # LLM Prompt for Multi-Order Extraction
 # ---------------------------------------------------------------------------
 
-_MULTI_ORDER_SYSTEM_PROMPT = """You are a food ordering AI assistant.
+_MULTI_ORDER_SYSTEM_PROMPT_TEMPLATE = """You are a food ordering AI assistant.
 
 Your job is to extract structured multi-item ordering intent from a user's message.
 
 Return ONLY valid JSON. Do not explain anything.
 
 Schema:
-{
+{{
   "items": [
-    {
+    {{
       "quantity": number,
       "dish_name": string,
       "restaurant_name": string
-    }
+    }}
   ]
-}
+}}
+
+AVAILABLE RESTAURANTS:
+{restaurant_list}
 
 Rules:
 - Extract ALL items mentioned by the user.
 - Each item MUST have a restaurant_name (from "from X" or "at X").
+- CRITICAL: The restaurant_name MUST be one of the AVAILABLE RESTAURANTS listed above.
+- The user may mispronounce or misspell restaurant names (e.g. "Macy District" = "Desi District", "the sea District" = "Desi District", "aroma" = "aroma"). Always map to the closest matching restaurant from the list.
 - If quantity is not mentioned, default to 1.
 - dish_name should be the food item name only (no restaurant or quantity).
-- restaurant_name should be the restaurant name only.
 - Handle "and", commas, and multiple items in one sentence.
+- If "some" or other vague quantities are used, default to 1.
 - Return only JSON.
 
 Examples:
 
 User: 1 butter masala from aroma and 2 chicken biryani from desi district
-Output: {"items": [{"quantity": 1, "dish_name": "butter masala", "restaurant_name": "aroma"}, {"quantity": 2, "dish_name": "chicken biryani", "restaurant_name": "desi district"}]}
+Output: {{"items": [{{"quantity": 1, "dish_name": "butter masala", "restaurant_name": "aroma"}}, {{"quantity": 2, "dish_name": "chicken biryani", "restaurant_name": "Desi District"}}]}}
 
-User: order 3 pizza from dominos, 1 biryani from spice garden
-Output: {"items": [{"quantity": 3, "dish_name": "pizza", "restaurant_name": "dominos"}, {"quantity": 1, "dish_name": "biryani", "restaurant_name": "spice garden"}]}
-
-User: i want butter chicken from aroma and samosa from spice garden
-Output: {"items": [{"quantity": 1, "dish_name": "butter chicken", "restaurant_name": "aroma"}, {"quantity": 1, "dish_name": "samosa", "restaurant_name": "spice garden"}]}
+User: i'd like to order some biryani from macy district
+Output: {{"items": [{{"quantity": 1, "dish_name": "biryani", "restaurant_name": "Desi District"}}]}}
 
 User: get me 2 naan and 1 dal tadka from spice garden
-Output: {"items": [{"quantity": 2, "dish_name": "naan", "restaurant_name": "spice garden"}, {"quantity": 1, "dish_name": "dal tadka", "restaurant_name": "spice garden"}]}
+Output: {{"items": [{{"quantity": 2, "dish_name": "naan", "restaurant_name": "Spice Garden"}}, {{"quantity": 1, "dish_name": "dal tadka", "restaurant_name": "Spice Garden"}}]}}
 
 User: i'd like to order 1 margherita pizza from dominos
-Output: {"items": [{"quantity": 1, "dish_name": "margherita pizza", "restaurant_name": "dominos"}]}"""
+Output: {{"items": [{{"quantity": 1, "dish_name": "margherita pizza", "restaurant_name": "dominos"}}]}}"""
+
+
+def _build_system_prompt(restaurant_names: list[str]) -> str:
+    """Build system prompt with available restaurant names."""
+    if restaurant_names:
+        restaurant_list = "\n".join(f"- {name}" for name in restaurant_names)
+    else:
+        restaurant_list = "(no restaurants available)"
+    return _MULTI_ORDER_SYSTEM_PROMPT_TEMPLATE.format(restaurant_list=restaurant_list)
 
 
 # ---------------------------------------------------------------------------
 # LLM Callers
 # ---------------------------------------------------------------------------
 
-def _call_openai_multi(text: str) -> dict | None:
+def _call_openai_multi(text: str, system_prompt: str) -> dict | None:
     """Call OpenAI API for multi-order extraction."""
     api_key = settings.openai_api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -84,7 +95,7 @@ def _call_openai_multi(text: str) -> dict | None:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": _MULTI_ORDER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text},
             ],
             temperature=0,
@@ -99,11 +110,11 @@ def _call_openai_multi(text: str) -> dict | None:
     return None
 
 
-def _call_sarvam_multi(text: str) -> dict | None:
+def _call_sarvam_multi(text: str, system_prompt: str) -> dict | None:
     """Call Sarvam AI for multi-order extraction."""
     try:
         from . import sarvam_service
-        result = sarvam_service.chat_completion(text, _MULTI_ORDER_SYSTEM_PROMPT)
+        result = sarvam_service.chat_completion(text, system_prompt)
         if result:
             cleaned = re.sub(r'```json\s*', '', result)
             cleaned = re.sub(r'```\s*', '', cleaned).strip()
@@ -113,16 +124,18 @@ def _call_sarvam_multi(text: str) -> dict | None:
     return None
 
 
-def extract_multi_order(text: str) -> list[dict]:
+def extract_multi_order(text: str, restaurant_names: list[str] = None) -> list[dict]:
     """
     Extract multi-order items from natural language text.
     Returns list of {quantity, dish_name, restaurant_name}.
     Uses OpenAI primary, Sarvam fallback.
+    restaurant_names: list of actual restaurant names for LLM to match against.
     """
+    system_prompt = _build_system_prompt(restaurant_names or [])
     # Try OpenAI first
-    result = _call_openai_multi(text)
+    result = _call_openai_multi(text, system_prompt)
     if not result:
-        result = _call_sarvam_multi(text)
+        result = _call_sarvam_multi(text, system_prompt)
     if not result:
         # Last resort: try local regex parsing
         return _parse_multi_order_local(text)
@@ -200,6 +213,12 @@ def find_restaurant(query: str, all_restaurants) -> models.Restaurant | None:
     if not query_lower:
         return None
 
+    # Strip common articles and filler words (voice transcription often adds these)
+    query_cleaned = re.sub(r'\b(?:the|a|an|at|in)\b', '', query_lower).strip()
+    query_cleaned = re.sub(r'\s+', ' ', query_cleaned)  # collapse whitespace
+
+    logger.info(f"[RESTAURANT MATCH] query='{query_lower}' cleaned='{query_cleaned}'")
+
     best_match = None
     best_score = 0.0
 
@@ -207,25 +226,58 @@ def find_restaurant(query: str, all_restaurants) -> models.Restaurant | None:
         name_lower = r.name.lower()
         slug_lower = (r.slug or "").lower()
 
-        # Exact match
+        # Exact match (original or cleaned)
         if query_lower == name_lower or query_lower == slug_lower:
+            logger.info(f"[RESTAURANT MATCH] ✅ exact match: '{r.name}'")
+            return r
+        if query_cleaned == name_lower or query_cleaned == slug_lower:
+            logger.info(f"[RESTAURANT MATCH] ✅ exact match (cleaned): '{r.name}'")
             return r
 
         # Substring match (high confidence)
         if query_lower in name_lower or name_lower in query_lower:
             score = 0.85
+        elif query_cleaned in name_lower or name_lower in query_cleaned:
+            score = 0.85
         elif query_lower in slug_lower or slug_lower in query_lower:
             score = 0.80
+        elif query_cleaned in slug_lower or slug_lower in query_cleaned:
+            score = 0.80
         else:
-            # Fuzzy similarity
-            score = max(_similarity(query_lower, name_lower),
-                        _similarity(query_lower, slug_lower))
+            # Fuzzy similarity on full string
+            full_score = max(_similarity(query_lower, name_lower),
+                            _similarity(query_cleaned, name_lower),
+                            _similarity(query_lower, slug_lower),
+                            _similarity(query_cleaned, slug_lower))
+
+            # Token-level matching (handles "sea District" → "Desi District")
+            query_words = query_cleaned.split()
+            name_words = name_lower.split()
+            if query_words and name_words:
+                matched = sum(
+                    1 for qw in query_words
+                    if any(
+                        qw == nw or qw in nw or nw in qw
+                        or _edit_distance(qw, nw) <= max(1, len(min(qw, nw, key=len)) // 3)
+                        for nw in name_words
+                    )
+                )
+                token_score = matched / max(len(query_words), len(name_words))
+            else:
+                token_score = 0.0
+
+            score = max(full_score, token_score)
 
         if score > best_score:
             best_score = score
             best_match = r
 
-    return best_match if best_score >= 0.5 else None
+    if best_match:
+        logger.info(f"[RESTAURANT MATCH] Best: '{best_match.name}' score={best_score:.2f} (threshold=0.45)")
+    else:
+        logger.info(f"[RESTAURANT MATCH] No match found for '{query_lower}'")
+
+    return best_match if best_score >= 0.45 else None
 
 
 def find_menu_item(query: str, restaurant_id: int, db: Session) -> models.MenuItem | None:
@@ -296,8 +348,15 @@ def process_multi_order(
         "voice_prompt": "Added 3 items to your cart from 2 restaurants."
     }
     """
-    # Step 1: Extract items from text via LLM
-    extracted = extract_multi_order(text)
+    # Step 1: Get all restaurants (needed for LLM prompt)
+    all_restaurants = crud.list_restaurants(db)
+    restaurant_names = list(set(r.name for r in all_restaurants))
+    logger.info(f"[MULTI-ORDER] Input: '{text}'")
+    logger.info(f"[MULTI-ORDER] Available restaurants: {restaurant_names}")
+
+    # Step 2: Extract items from text via LLM (with restaurant list for smart matching)
+    extracted = extract_multi_order(text, restaurant_names)
+    logger.info(f"[MULTI-ORDER] LLM extracted: {extracted}")
     if not extracted:
         return {
             "added": [],
@@ -308,9 +367,6 @@ def process_multi_order(
             "voice_prompt": "I couldn't understand the order. Please try again.",
         }
 
-    # Step 2: Get all restaurants
-    all_restaurants = crud.list_restaurants(db)
-
     added = []
     not_found = []
 
@@ -318,8 +374,9 @@ def process_multi_order(
         qty = item_req.get("quantity", 1)
         dish_name = item_req.get("dish_name", "")
         restaurant_name = item_req.get("restaurant_name", "")
+        logger.info(f"[MULTI-ORDER] Processing: {qty}x '{dish_name}' from '{restaurant_name}'")
 
-        # Step 3: Find restaurant
+        # Step 3: Find restaurant — LLM already mapped to real name, so exact match first
         restaurant = find_restaurant(restaurant_name, all_restaurants)
         if not restaurant:
             not_found.append({
@@ -370,10 +427,10 @@ def process_multi_order(
         if not_found:
             summary += "\n\n⚠️ Not found:\n" + "\n".join(f"  • {nf['reason']}" for nf in not_found)
 
-        summary += "\n\n🛒 Check your cart to review and checkout!"
+        summary += "\n\n🛒 Would you like anything else, or shall we checkout?"
 
         voice_parts = [f"{a['quantity']} {a['item_name']}" for a in added]
-        voice_prompt = f"Added {', '.join(voice_parts)} to your cart. Total {total_str}. Check your cart to review and checkout."
+        voice_prompt = f"Added {', '.join(voice_parts)} to your cart. Total {total_str}. Would you like anything else, or shall we checkout?"
     else:
         summary = "❌ Couldn't find any of the requested items.\n"
         summary += "\n".join(f"  • {nf['reason']}" for nf in not_found)

@@ -161,6 +161,8 @@ class ChatMessageOut(BaseModel):
     items: list[dict] | None = None
     cart_summary: dict | None = None
     voice_prompt: str | None = None
+    client_action: str | None = None
+    client_query: str | None = None
 
 
 # --- Cart schemas ---

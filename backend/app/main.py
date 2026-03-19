@@ -915,6 +915,8 @@ def send_message(
         items=result.get("items"),
         cart_summary=result.get("cart_summary"),
         voice_prompt=result.get("voice_prompt"),
+        client_action=result.get("client_action"),
+        client_query=result.get("client_query"),
     )
 
 

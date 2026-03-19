@@ -148,7 +148,7 @@ def chat_completion(
     payload = {
         "model": "sarvam-m",
         "messages": messages,
-        "max_tokens": 200,
+        "max_tokens": 1000,
         "temperature": 0.7,
     }
 

@@ -61,6 +61,16 @@ def list_items(db: Session, category_id: int) -> list[MenuItem]:
     )
 
 
+def list_all_items(db: Session, restaurant_id: int) -> list[MenuItem]:
+    return (
+        db.query(MenuItem)
+        .join(MenuCategory)
+        .filter(MenuCategory.restaurant_id == restaurant_id)
+        .filter(MenuItem.is_available.is_(True))
+        .all()
+    )
+
+
 def create_chat_session(db: Session, user_id: int) -> ChatSession:
     session = ChatSession(user_id=user_id)
     db.add(session)
@@ -119,6 +129,20 @@ def add_order_item(
     db.commit()
     db.refresh(item)
     return item
+
+
+def remove_order_item(db: Session, order: Order, order_item_id: int) -> bool:
+    oi = db.query(OrderItem).filter(OrderItem.id == order_item_id, OrderItem.order_id == order.id).first()
+    if not oi:
+        return False
+    db.delete(oi)
+    db.commit()
+    recompute_order_total(db, order)
+    remaining = db.query(OrderItem).filter(OrderItem.order_id == order.id).count()
+    if remaining == 0:
+        db.delete(order)
+        db.commit()
+    return True
 
 
 def recompute_order_total(db: Session, order: Order) -> None:

@@ -15,7 +15,7 @@
 
 import { vlog } from './VoiceDebugLogger.js';
 
-const DEBOUNCE_MS = 1000;
+const DEBOUNCE_MS = 2500; // Increased from 1000 to allow users to pause and think mid-sentence
 
 const _isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
 const _isSafari = typeof navigator !== 'undefined' && /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -257,9 +257,9 @@ export class SpeechRecognizer {
             let speechDetected = false;
             let silenceStart = null;
             const SILENCE_THRESHOLD = 15;    // RMS threshold for "silence"
-            const SILENCE_DURATION = 1500;   // ms of silence after speech to auto-stop
-            const MIN_RECORDING = 1000;      // minimum ms before allowing auto-stop
-            const MAX_RECORDING = 8000;      // maximum recording duration
+            const SILENCE_DURATION = 2500;   // Increased from 1500: ms of silence after speech to auto-stop
+            const MIN_RECORDING = 2000;      // Increased from 1000: minimum ms before allowing auto-stop
+            const MAX_RECORDING = 12000;     // Increased from 8000
             const recordStart = Date.now();
 
             try {

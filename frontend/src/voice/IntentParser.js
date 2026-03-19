@@ -189,13 +189,20 @@ export function parseIntent(text, convState = {}, restaurants = []) {
         // Handle 'I want to select X restaurant', 'can you select the restaurant X', 'take me to X', 'let's try X'
         const wantSelectRegex = /(?:i\s+want\s+(?:to\s+)?(?:select|go\s+to|try|visit|order\s+from|eat\s+(?:at|from))\s+|take\s+me\s+to\s+|let'?s?\s+(?:go\s+to|try|eat\s+at)\s+|(?:can|could|would)\s+you\s+(?:please\s+)?(?:select|switch\s+to|change\s+to|go\s+to|open|show)\s+(?:the\s+)?(?:restaurant\s+)?|please\s+(?:select|switch\s+to|change\s+to|go\s+to|open)\s+(?:the\s+)?(?:restaurant\s+)?)(.+?)(?:\s+restaurant|\s+menu)?\s*$/i;
 
+        // Skip CHANGE_RESTAURANT when a specific food item + "from" is detected
+        // but ALLOW it if it's just "order something from" or "I want food from"
+        const hasOrderingKeywords = /(?:order|i'?d?\s+like|i\s+want|get\s+me|give\s+me|add|i'?ll\s+(?:have|take)|can\s+i\s+(?:have|get))\b/i.test(t);
+        const hasVagueItem = /(?:order|get|have)\s+(?:something|anything|food|a\s+meal|it)\s+(?:from|at)\s+/i.test(t);
+        const hasFoodBeforeFrom = /\b(?:one|two|three|four|five|\d+)?\s*\w+.*\s+(?:from|at)\s+/i.test(t) && !hasVagueItem;
+
         let candidateName = null;
 
         if (switchRegex.test(t)) {
             candidateName = t.replace(switchRegex, '').trim();
         } else if (wantSelectRegex.test(t)) {
             candidateName = t.match(wantSelectRegex)?.[1]?.trim();
-        } else if (fromRegex.test(t)) {
+        } else if (fromRegex.test(t) && !(hasOrderingKeywords && hasFoodBeforeFrom)) {
+            // Only treat "from X" as restaurant switch if no ordering keywords present
             candidateName = t.match(fromRegex)?.[1]?.trim();
         } else if (selectRegex.test(t)) {
             candidateName = t.replace(selectRegex, '').trim();
@@ -280,6 +287,18 @@ export function parseIntent(text, convState = {}, restaurants = []) {
             result.parseTimeMs = performance.now() - start;
             return result;
         }
+    }
+
+    // ─── 8.5 Remove from cart ────────────────────────────────────
+    if (REMOVE_PATTERNS.some(p => p.test(t))) {
+        result.intent = INTENTS.REMOVE_ITEM;
+        // Optionally try to extract the item name to remove
+        const itemMatch = t.replace(/^(?:remove|delete|cancel|take\s+out|drop)\s+(?:the\s+)?(?:cart\s+)?(?:item[s]?\s+)?/i, '').trim();
+        if (itemMatch && itemMatch !== "whatever you have added" && itemMatch !== "that") {
+            result.entities.dish = itemMatch;
+        }
+        result.parseTimeMs = performance.now() - start;
+        return result;
     }
 
     // ─── 9. Add to cart ──────────────────────────────────────────
@@ -384,11 +403,12 @@ function fuzzyMatchRestaurant(name, restaurants) {
 }
 
 /**
- * Detect if input is a multi-restaurant order.
+ * Detect if input is an order from a specific restaurant.
  * Matches patterns like:
- *   "1 butter masala from aroma and 2 chicken biryani from desi district"
- *   "order pizza from dominos, biryani from spice garden"
- *   "i want naan from aroma and samosa from spice garden"
+ *   MULTI: "1 butter masala from aroma and 2 chicken biryani from desi district"
+ *   MULTI: "order pizza from dominos, biryani from spice garden"
+ *   SINGLE: "I'd like to order one South Indian Biryani from aroma"
+ *   SINGLE: "get me 2 naan from spice garden"
  */
 export function isMultiOrder(text) {
     const t = text.toLowerCase().trim();
@@ -400,6 +420,16 @@ export function isMultiOrder(text) {
     if (/\d*\s*\w+.*?\s+(?:from|at)\s+\w+.*?(?:and|,)\s*\d*\s*\w+.*?\s+(?:from|at)\s+\w+/i.test(t)) {
         return true;
     }
+
+    // Single item order: "order X from Y", "I'd like X from Y", "get me X from Y"
+    // Must have an ordering keyword + food description + "from/at" restaurant
+    const hasOrderVerb = /(?:^|\b)(?:order|i'?d?\s+like(?:\s+to\s+order)?|i\s+want(?:\s+to\s+order)?|get\s+me|give\s+me|add|i'?ll\s+(?:have|take)|can\s+i\s+(?:have|get))\b/i.test(t);
+    const hasFromClause = /\s+(?:from|at)\s+\w+/i.test(t);
+
+    // Explicitly reject vague items like "something", "anything", "food"
+    const hasVagueItem = /(?:order|get|have)\s+(?:something|anything|food|a\s+meal|it)\s+(?:from|at)\s+/i.test(t);
+
+    if (hasOrderVerb && hasFromClause && !hasVagueItem) return true;
 
     return false;
 }

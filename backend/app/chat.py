@@ -8,17 +8,19 @@ Returns dicts with:
   - categories: list of category dicts (for interactive chips)
   - items: list of item dicts (for interactive cards)
   - voice_prompt: short TTS-friendly follow-up question for voice mode
+  - client_action: instruction for the frontend to route to a different system (e.g. MEAL_PLAN)
+  - client_query: arguments for the client_action
 """
 from __future__ import annotations
 
 import re
 from datetime import datetime
-from difflib import SequenceMatcher
 
 from sqlalchemy.orm import Session
 
 from . import crud
 from .models import ChatSession, MenuItem, Order
+from .llm_router import extract_unified_intent
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +28,8 @@ from .models import ChatSession, MenuItem, Order
 # ---------------------------------------------------------------------------
 
 def _result(reply, restaurant_id=None, category_id=None, order_id=None,
-            categories=None, items=None, cart_summary=None, voice_prompt=None):
+            categories=None, items=None, cart_summary=None, voice_prompt=None,
+            client_action=None, client_query=None):
     return {
         "reply": reply,
         "restaurant_id": restaurant_id,
@@ -36,6 +39,8 @@ def _result(reply, restaurant_id=None, category_id=None, order_id=None,
         "items": items,
         "cart_summary": cart_summary,
         "voice_prompt": voice_prompt,
+        "client_action": client_action,
+        "client_query": client_query,
     }
 
 
@@ -121,1043 +126,179 @@ def _build_voice_item_list(items, limit=4):
 
 
 # ---------------------------------------------------------------------------
-# Smart restaurant matching from natural language
-# ---------------------------------------------------------------------------
-
-_RESTAURANT_INTENTS = [
-    r"(?:order|eat|food|ordering|get food|get something)\s+(?:from|at|in)\s+(.+)",
-    r"(?:i want to|i'd like to|let me|can i|could i)\s+(?:order|eat|get food|get something)\s+(?:from|at|in)\s+(.+)",
-    r"(?:go to|open|select|pick|choose|show me)\s+(.+)",
-    r"(?:take me to|switch to|change to)\s+(.+)",
-]
-
-
-def _extract_restaurant_name(text: str) -> str | None:
-    """Extract restaurant name from natural language input."""
-    lower = text.lower().strip()
-    for pattern in _RESTAURANT_INTENTS:
-        m = re.search(pattern, lower)
-        if m:
-            name = m.group(1).strip()
-            # Clean trailing intent words
-            for suffix in ["restaurant", "please", "menu", "and", "then"]:
-                name = re.sub(rf'\s+{suffix}$', '', name).strip()
-            if name:
-                return name
-    return None
-
-
-def _extract_item_after_restaurant(text: str) -> str | None:
-    """Extract item name from compound voice commands like 'order biryani from Desi District'."""
-    lower = text.lower().strip()
-    patterns = [
-        r"(?:order|get|add|i want|give me|i'd like)\s+(.+?)\s+(?:from|at|in)\s+",
-        r"(.+?)\s+(?:from|at|in)\s+",
-    ]
-    _INTENT_WORDS = {"order", "food", "eat", "something", "stuff", "anything",
-                     "ordering", "get", "want", "like", "have", "need",
-                     "i", "to", "some", "a", "an", "the", "me", "please",
-                     "would", "could", "can", "let", "i'd", "i'll"}
-    for pattern in patterns:
-        m = re.search(pattern, lower)
-        if m:
-            item = m.group(1).strip()
-            for filler in ["some", "a", "an", "the", "me", "to", "i want", "i'd like",
-                           "please", "can i get", "can i have"]:
-                item = re.sub(rf'^{re.escape(filler)}\s*', '', item).strip()
-            if not item or len(item) <= 1:
-                continue
-            words = set(item.split())
-            if words.issubset(_INTENT_WORDS):
-                continue
-            return item
-    return None
-
-
-def _find_best_restaurant(name: str, all_restaurants) -> object | None:
-    """Fuzzy match a restaurant name."""
-    name_lower = name.lower().strip()
-    if not name_lower:
-        return None
-
-    # Exact slug or name match
-    for r in all_restaurants:
-        if r.slug == name_lower or r.name.lower() == name_lower:
-            return r
-
-    # Partial match
-    for r in all_restaurants:
-        if name_lower in r.name.lower() or r.name.lower() in name_lower:
-            return r
-        slug_clean = r.slug.replace('-', ' ')
-        if name_lower in slug_clean or slug_clean in name_lower:
-            return r
-
-    # Fuzzy match
-    best, best_score = None, 0.0
-    for r in all_restaurants:
-        score = max(
-            _similarity(name_lower, r.name.lower()),
-            _similarity(name_lower, r.slug.replace('-', ' ')),
-        )
-        if score > best_score:
-            best_score = score
-            best = r
-    return best if best_score >= 0.5 else None
-
-
-# Stop words shared with /search/menu-items in main.py
-_CHAT_STOP_WORDS = {
-    "i", "a", "an", "the", "is", "am", "are", "was", "were", "be", "been",
-    "do", "does", "did", "have", "has", "had", "will", "would", "can",
-    "could", "should", "may", "might", "shall", "to", "of", "in", "on",
-    "at", "for", "with", "from", "by", "it", "its", "my", "me", "we",
-    "us", "you", "your", "he", "she", "they", "them", "this", "that",
-    "want", "need", "get", "find", "buy", "give", "show", "where",
-    "what", "which", "how", "much", "many", "some", "any", "all",
-    "please", "just", "like", "also", "very", "really", "about",
-    "nearby", "near", "here", "around", "cheapest", "cheap", "compare",
-    "price", "best", "value", "lowest",
-}
-
-
-def _edit_distance_chat(a: str, b: str) -> int:
-    """Simple Levenshtein distance for fuzzy matching."""
-    if len(a) < len(b):
-        return _edit_distance_chat(b, a)
-    if len(b) == 0:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a):
-        curr = [i + 1]
-        for j, cb in enumerate(b):
-            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if ca == cb else 1)))
-        prev = curr
-    return prev[len(b)]
-
-
-def _fuzzy_match_chat(keyword: str, text: str) -> bool:
-    """Check if keyword appears in text — exact substring OR fuzzy (edit distance ≤ threshold)."""
-    if keyword in text:
-        return True
-    for word in text.split():
-        word_clean = word.strip("(),.-!?").lower()
-        if len(keyword) >= 3 and len(word_clean) >= 3:
-            threshold = 1 if len(keyword) <= 5 else 2
-            if _edit_distance_chat(keyword, word_clean) <= threshold:
-                return True
-    return False
-
-
-def _search_items_across_restaurants(db: Session, query: str, restaurants, limit=5):
-    """Search for items across all restaurants.
-
-    Quality rules (matching /search/menu-items):
-    1. Strip stop words from the query
-    2. Exclude $0 items
-    3. Require ALL keywords to match (exact or fuzzy)
-    4. Sort by price ascending (cheapest first)
-    """
-    raw_keywords = query.lower().strip().split()
-    keywords = [kw for kw in raw_keywords if kw not in _CHAT_STOP_WORDS and len(kw) >= 2]
-
-    # Fallback: if all words were stop words, use the longest raw keyword
-    if not keywords:
-        keywords = sorted(raw_keywords, key=len, reverse=True)[:1]
-    if not keywords:
-        return []
-
-    results = []
-    for rest in restaurants:
-        all_items = _get_all_restaurant_items(db, rest.id)
-        for item in all_items:
-            # Exclude $0 items
-            if item.price_cents <= 0:
-                continue
-            item_name_lower = item.name.lower()
-            # Require ALL keywords to match (exact or fuzzy)
-            matched = sum(1 for kw in keywords if _fuzzy_match_chat(kw, item_name_lower))
-            if matched == len(keywords):
-                # Bonus for exact substring matches
-                exact_bonus = sum(1 for kw in keywords if kw in item_name_lower)
-                score = matched + exact_bonus
-                results.append((item, rest, score))
-
-    # Sort by match score DESC, then price ASC (cheapest first)
-    results.sort(key=lambda x: (-x[2], x[0].price_cents))
-    return results[:limit]
-
-
-#
-# Fuzzy item matching — IMPROVED for voice accuracy
-# ---------------------------------------------------------------------------
-
-def _similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
-def _token_match_score(query: str, item_name: str) -> float:
-    """
-    Token-level matching: check if query words appear as substrings
-    or close matches of item name words. Much better for voice input
-    where users say partial names like "chicken" for "Chicken Biryani".
-    """
-    query_tokens = query.lower().split()
-    name_tokens = item_name.lower().split()
-    if not query_tokens or not name_tokens:
-        return 0.0
-
-    matched_tokens = 0
-    for qt in query_tokens:
-        best_word_score = 0.0
-        for nt in name_tokens:
-            # Exact word match
-            if qt == nt:
-                best_word_score = 1.0
-                break
-            # Substring match
-            if len(qt) >= 3 and (qt in nt or nt in qt):
-                best_word_score = max(best_word_score, 0.85)
-            # Fuzzy word match
-            word_sim = _similarity(qt, nt)
-            best_word_score = max(best_word_score, word_sim)
-        if best_word_score >= 0.7:
-            matched_tokens += 1
-
-    # Score = ratio of matched query tokens
-    return matched_tokens / len(query_tokens)
-
-
-def _llm_match_item(user_input: str, items: list[MenuItem]) -> MenuItem | None:
-    """
-    Use Sarvam AI LLM to intelligently match voice input against menu items.
-    Much more accurate than fuzzy string matching for voice transcriptions.
-    """
-    if not items or not user_input.strip():
-        return None
-
-    try:
-        from . import sarvam_service
-
-        # Build a numbered list of item names for the LLM
-        item_names = [f"{i+1}. {item.name}" for i, item in enumerate(items)]
-        item_list_str = "\n".join(item_names)
-
-        system_prompt = (
-            "You are a menu item matcher for a restaurant ordering system. "
-            "The user is ordering food via voice. Match their spoken input to the closest menu item. "
-            "Reply with ONLY the number of the matched item. If no item matches, reply with 0. "
-            "Be smart about voice transcription errors (e.g., 'chaat' = 'chat', 'briyani' = 'biryani'). "
-            "Do not explain, just reply with the number."
-        )
-
-        context = f"Available menu items:\n{item_list_str}"
-        user_msg = f"Customer said: \"{user_input}\""
-
-        result = sarvam_service.chat_completion(user_msg, system_prompt, context)
-        result = result.strip()
-
-        # Extract number from response
-        import re as _re
-        num_match = _re.search(r'\d+', result)
-        if num_match:
-            idx = int(num_match.group()) - 1  # Convert 1-indexed to 0-indexed
-            if 0 <= idx < len(items):
-                return items[idx]
-    except Exception as e:
-        # LLM failed — fall back to fuzzy matching
-        import traceback
-        traceback.print_exc()
-
-    return None
-
-
-def _llm_match_category(user_input: str, categories: list) -> object | None:
-    """
-    Use Sarvam AI LLM to intelligently match voice input against category names.
-    """
-    if not categories or not user_input.strip():
-        return None
-
-    try:
-        from . import sarvam_service
-
-        cat_names = [f"{i+1}. {cat['name'] if isinstance(cat, dict) else cat.name}" for i, cat in enumerate(categories)]
-        cat_list_str = "\n".join(cat_names)
-
-        system_prompt = (
-            "You are a category matcher for a restaurant ordering system. "
-            "The user is browsing categories via voice. Match their spoken input to the closest category. "
-            "Reply with ONLY the number of the matched category. If no category matches, reply with 0. "
-            "Be smart about voice transcription errors. "
-            "Do not explain, just reply with the number."
-        )
-
-        context = f"Available categories:\n{cat_list_str}"
-        user_msg = f"Customer said: \"{user_input}\""
-
-        result = sarvam_service.chat_completion(user_msg, system_prompt, context)
-        result = result.strip()
-
-        import re as _re
-        num_match = _re.search(r'\d+', result)
-        if num_match:
-            idx = int(num_match.group()) - 1
-            if 0 <= idx < len(categories):
-                return categories[idx]
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-
-    return None
-
-
-def _compute_item_score(query: str, item: MenuItem) -> float:
-    """Compute a combined score for an item match using multiple strategies."""
-    query_lower = query.lower().strip()
-    name_lower = item.name.lower()
-
-    # Strategy 1: Exact full match
-    if query_lower == name_lower:
-        return 1.0
-
-    # Strategy 2: Full substring match
-    if query_lower in name_lower:
-        # Longer substring = higher score
-        return 0.85 + 0.1 * (len(query_lower) / len(name_lower))
-
-    # Strategy 3: Reverse substring (item name in query)
-    if name_lower in query_lower:
-        return 0.80
-
-    # Strategy 4: Token-level matching (best for voice)
-    token_score = _token_match_score(query_lower, name_lower)
-
-    # Strategy 5: Sequence matcher on full string
-    seq_score = _similarity(query_lower, name_lower)
-
-    # Take the best score
-    return max(token_score * 0.9, seq_score)
-
-
-def _find_best_item(query: str, all_items: list[MenuItem]) -> MenuItem | None:
-    """Find the single best matching item. Higher threshold for voice accuracy."""
-    query_lower = query.lower().strip()
-    if not query_lower:
-        return None
-
-    # Exact match first
-    for item in all_items:
-        if item.name.lower() == query_lower:
-            return item
-
-    # Score all items
-    scored = []
-    for item in all_items:
-        score = _compute_item_score(query_lower, item)
-        if score >= 0.65:  # Raised from 0.55 for better accuracy
-            scored.append((item, score))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-
-    if not scored:
-        return None
-
-    # If top match is strong enough (>= 0.75), return it directly
-    if scored[0][1] >= 0.75:
-        return scored[0][0]
-
-    # If borderline (0.65-0.75), only return if it's clearly the best
-    if len(scored) == 1:
-        return scored[0][0]
-
-    # If multiple items with similar scores, don't guess — return None
-    # (caller should use _find_matching_items for disambiguation)
-    if len(scored) >= 2 and scored[1][1] >= scored[0][1] * 0.85:
-        return None  # Too ambiguous
-
-    return scored[0][0]
-
-
-def _find_matching_items(query: str, all_items: list[MenuItem], limit=5) -> list[MenuItem]:
-    """Find multiple matching items for disambiguation."""
-    query_lower = query.lower().strip()
-    scored = []
-    for item in all_items:
-        score = _compute_item_score(query_lower, item)
-        if score >= 0.40:
-            scored.append((item, score))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [item for item, _ in scored[:limit]]
-
-
-def _parse_order_items(text: str, all_items: list[MenuItem]) -> list[tuple[MenuItem, int]]:
-    word_to_num = {
-        "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
-        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-    }
-
-    cleaned = text.lower().strip()
-    for filler in ["i want", "i'd like", "i would like", "give me", "get me",
-                   "can i have", "can i get", "please", "order", "add"]:
-        cleaned = cleaned.replace(filler, "")
-    cleaned = cleaned.strip().strip(",").strip()
-
-    if not cleaned:
-        return []
-
-    parts = re.split(r'\s*(?:,\s*and|\band\b|,|&|\+)\s*', cleaned)
-
-    results = []
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-
-        quantity = 1
-        num_match = re.match(r'^(\d+)\s+(.+)', part)
-        if num_match:
-            quantity = int(num_match.group(1))
-            part = num_match.group(2).strip()
-        else:
-            words = part.split()
-            if words and words[0] in word_to_num:
-                quantity = word_to_num[words[0]]
-                part = " ".join(words[1:]).strip()
-
-        trailing = re.match(r'(.+?)\s*x\s*(\d+)$', part)
-        if trailing:
-            part = trailing.group(1).strip()
-            quantity = int(trailing.group(2))
-
-        item = _find_best_item(part, all_items)
-        if item:
-            results.append((item, quantity))
-
-    return results
-
-
-def _get_all_restaurant_items(db: Session, restaurant_id: int) -> list[MenuItem]:
-    categories = crud.list_categories(db, restaurant_id)
-    all_items = []
-    for cat in categories:
-        all_items.extend(crud.list_items(db, cat.id))
-    return all_items
-
-
-# ---------------------------------------------------------------------------
 # Main message processor
 # ---------------------------------------------------------------------------
 
 def process_message(db: Session, session: ChatSession, text: str) -> dict:
     cleaned = text.strip()
-    lower = cleaned.lower()
+    
+    # 1. Gather Context
+    all_rests = crud.list_restaurants(db)
+    current_rest = crud.get_restaurant_by_slug_or_id(db, str(session.restaurant_id)) if session.restaurant_id else None
+    current_menu = crud.list_all_items(db, session.restaurant_id) if session.restaurant_id else []
+    
+    pending_orders = crud.get_user_pending_orders(db, session.user_id)
+    cart_ctx = []
+    for o in pending_orders:
+        for oi in o.items:
+            mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
+            if mi:
+                cart_ctx.append({"item_id": mi.id, "name": mi.name, "quantity": oi.quantity})
 
-    # --- Reset / Exit ---
-    if lower in ("#reset", "#exit", "reset", "exit", "start over"):
-        _set_session_state(db, session, restaurant_id=None, category_id=None, order_id=None)
-        return _result(
-            "Session reset. Type # to pick a restaurant!",
-            voice_prompt="Which restaurant would you like to order from?",
-        )
-
-    # --- AI Budget Optimizer intent ---
-    budget_patterns = [
-        r'feed\s+(\d+)\s+people?\s+(?:for\s+)?(?:under\s+)?\$?(\d+)',
-        r'meal\s+for\s+(\d+)\s+(?:people?\s+)?(?:under\s+)?\$?(\d+)',
-        r'budget\s+(?:meal\s+)?(?:for\s+)?(\d+)\s+people?\s+\$?(\d+)',
-        r'(\d+)\s+people?\s+(?:under\s+|for\s+|within\s+)\$?(\d+)',
-        r'(?:order|food)\s+for\s+(\d+)\s+(?:people?\s+)?(?:under\s+)?\$?(\d+)',
-    ]
-    for bp in budget_patterns:
-        budget_match = re.search(bp, lower)
-        if budget_match:
-            people = int(budget_match.group(1))
-            budget_dollars = int(budget_match.group(2))
-            budget_cents = budget_dollars * 100
-
-            # Extract optional cuisine hint
-            cuisine = None
-            cuisine_match = re.search(r'(?:cuisine|type|style)[:\s]+(\w+)', lower)
-            if not cuisine_match:
-                for c in ["indian", "italian", "chinese", "mexican", "thai", "japanese", "american"]:
-                    if c in lower:
-                        cuisine = c.capitalize()
-                        break
-            else:
-                cuisine = cuisine_match.group(1).capitalize()
-
-            from . import optimizer
-            results = optimizer.optimize_meal(
-                db,
-                people=people,
-                budget_cents=budget_cents,
-                cuisine=cuisine,
-                restaurant_id=session.restaurant_id,
-            )
-
-            if not results:
-                return _result(
-                    f"Sorry, I couldn't find a meal combo for {people} people under ${budget_dollars}. "
-                    f"Try increasing your budget or reducing the number of people.",
-                    voice_prompt=f"I couldn't find a combo for {people} people under {budget_dollars} dollars. Try a higher budget.",
-                )
-
-            # Format the best combo
-            best = results[0]
-            lines = [f"💰 **Best combo at {best['restaurant_name']}:**\n"]
-            for item in best["items"]:
-                price = f"${item['price_cents'] * item['quantity'] / 100:.2f}"
-                lines.append(f"  {item['quantity']}x {item['name']} — {price}")
-            total = f"${best['total_cents'] / 100:.2f}"
-            lines.append(f"\n**Total: {total}**")
-            lines.append(f"**Feeds: {best['feeds_people']} people**")
-
-            if len(results) > 1:
-                lines.append(f"\n_({len(results) - 1} more option{'s' if len(results) > 2 else ''} available)_")
-
-            reply = "\n".join(lines)
-            voice_items = ", ".join(f"{i['quantity']} {i['name']}" for i in best["items"])
-            voice = (
-                f"Best combo at {best['restaurant_name']}. "
-                f"{voice_items}. Total {total}, feeds {best['feeds_people']} people."
-            )
-
-            return _result(reply, voice_prompt=voice)
-
-    # --- Restaurant selection via #slug ---
-    if cleaned.startswith("#"):
-        slug = cleaned.lstrip("#").strip().lower()
-        if not slug:
-            return _result(
-                "Type # followed by a restaurant name to get started.",
-                voice_prompt="Which restaurant would you like to order from?",
-            )
-
-        restaurant = crud.get_restaurant_by_slug_or_id(db, slug)
-        if not restaurant:
-            restaurants = crud.list_restaurants(db)
-            for r in restaurants:
-                if _similarity(slug, r.slug) >= 0.6 or _similarity(slug, r.name.lower()) >= 0.6:
-                    restaurant = r
-                    break
-
-        if not restaurant:
-            return _result(
-                "Restaurant not found. Type # to see suggestions.",
-                voice_prompt="I couldn't find that restaurant. Please say the name again.",
-            )
-
-        existing_order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
-        new_order_id = existing_order.id if existing_order else None
-        _set_session_state(db, session, restaurant_id=restaurant.id, category_id=None, order_id=new_order_id)
-        cats = _categories_data(db, restaurant.id)
-        cart = _build_cart_summary_chat(db, session.user_id)
-
-        cat_list = _build_voice_category_list(cats) if cats else "the menu"
-        reply = f"Welcome to {restaurant.name}! Pick a category or just tell me what you want."
-        return _result(
-            reply, restaurant_id=restaurant.id, categories=cats, cart_summary=cart,
-            voice_prompt=f"Welcome to {restaurant.name}. We have these categories: {cat_list}. Which one would you like?",
-        )
-
-    # --- If no restaurant selected yet: try smart matching ---
-    if session.restaurant_id is None:
-        all_restaurants = crud.list_restaurants(db)
-
-        extracted_name = _extract_restaurant_name(cleaned)
-        item_hint = _extract_item_after_restaurant(cleaned) if extracted_name else None
-
-        candidate = extracted_name or cleaned
-        restaurant = _find_best_restaurant(candidate, all_restaurants)
-
-        if restaurant:
-            existing_order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
-            new_order_id = existing_order.id if existing_order else None
-            _set_session_state(db, session, restaurant_id=restaurant.id, category_id=None, order_id=new_order_id)
-            cats = _categories_data(db, restaurant.id)
-            cart = _build_cart_summary_chat(db, session.user_id)
-            cat_list = _build_voice_category_list(cats) if cats else "the menu"
-
-            # If compound command had an item hint, try to match it
-            if item_hint:
-                all_items = _get_all_restaurant_items(db, restaurant.id)
-                parsed_items = _parse_order_items(item_hint, all_items)
-                if parsed_items:
-                    order = crud.get_user_order_for_restaurant(db, session.user_id, restaurant.id)
-                    if not order:
-                        order = crud.create_order(db, session.user_id, restaurant.id)
-                    crud.attach_order_to_session(db, session, order)
-                    added = []
-                    for menu_item, qty in parsed_items:
-                        crud.add_order_item(db, order, menu_item, qty)
-                        added.append(f"  {qty}x {menu_item.name} - ${menu_item.price_cents * qty / 100:.2f}")
-                    crud.recompute_order_total(db, order)
-                    total = f"${order.total_cents / 100:.2f}"
-                    cart = _build_cart_summary_chat(db, session.user_id)
-                    added_names = ", ".join(m.name for m, _ in parsed_items)
-                    reply = f"Welcome to {restaurant.name}!\n\nAdded to your order:\n" + "\n".join(added)
-                    reply += f"\n\nCart total: {total}"
-                    return _result(
-                        reply, restaurant_id=restaurant.id, order_id=order.id,
-                        categories=cats, cart_summary=cart,
-                        voice_prompt=f"Added {added_names}. Your total is {total}. Would you like anything else, or say done to finish?",
-                    )
-
-                # Try matching as category
-                categories = crud.list_categories(db, restaurant.id)
-                for cat in categories:
-                    if _similarity(item_hint.lower(), cat.name.lower()) >= 0.6:
-                        items = _items_data(db, cat.id)
-                        item_list = _build_voice_item_list(items)
-                        return _result(
-                            f"Welcome to {restaurant.name}!\n\n{cat.name} — {len(items)} items. Tap + to add or tell me what you want!",
-                            restaurant_id=restaurant.id, category_id=cat.id, order_id=new_order_id,
-                            categories=cats, items=items, cart_summary=cart,
-                            voice_prompt=f"{cat.name}. Which one would you like?",
-                        )
-
-                # Try fuzzy item search as fallback
-                matches = _find_matching_items(item_hint, all_items)
-                if matches:
-                    items_data = [
-                        {"id": m.id, "name": m.name, "description": m.description or "", "price_cents": m.price_cents}
-                        for m in matches
-                    ]
-                    match_names = ", ".join(m.name for m in matches[:3])
-                    return _result(
-                        f'Welcome to {restaurant.name}!\n\nFound {len(matches)} items matching "{item_hint}". Tap + to add!',
-                        restaurant_id=restaurant.id, order_id=new_order_id,
-                        categories=cats, items=items_data, cart_summary=cart,
-                        voice_prompt=f"I found these items: {match_names}. Which one would you like?",
-                    )
-
-            reply = f"Welcome to {restaurant.name}! Pick a category or just tell me what you want."
-            return _result(
-                reply, restaurant_id=restaurant.id, categories=cats, cart_summary=cart,
-                voice_prompt=f"Welcome to {restaurant.name}. We have: {cat_list}. Which category would you like?",
-            )
-
-        # No restaurant match — try cross-restaurant item search
-        if all_restaurants and len(cleaned) > 2:
-            cross_results = _search_items_across_restaurants(db, cleaned, all_restaurants)
-            if cross_results:
-                # Extract meaningful keywords for display
-                raw_kws = cleaned.lower().split()
-                display_kws = [kw for kw in raw_kws if kw not in _CHAT_STOP_WORDS and len(kw) >= 2]
-                display_query = " ".join(display_kws) if display_kws else cleaned
-                lines = [f'Found "{display_query}" at these restaurants:\n']
-                seen = set()
-                rest_names = []
-                for item, rest, score in cross_results:
-                    if rest.id not in seen:
-                        lines.append(f"• **{rest.name}** — {item.name} (${item.price_cents/100:.2f})")
-                        rest_names.append(rest.name)
-                        seen.add(rest.id)
-                lines.append(f'\nSay the restaurant name or type #{cross_results[0][1].slug} to order!')
-                return _result(
-                    "\n".join(lines),
-                    voice_prompt=f"I found that item at: {', '.join(rest_names[:3])}. Which restaurant would you like?",
-                )
-
-        # Final fallback
-        if all_restaurants:
-            suggestions = [f"• {r.name} — #{r.slug}" for r in all_restaurants[:5]]
-            rest_names = ", ".join(r.name for r in all_restaurants[:5])
-            return _result(
-                "I couldn't find that restaurant. Available options:\n\n" + "\n".join(suggestions)
-                + "\n\nSay a restaurant name or type # to browse!",
-                voice_prompt=f"I couldn't find that. Available restaurants are: {rest_names}. Which one?",
-            )
-        return _result(
-            "No restaurants available. Add your zipcode to find nearby options!",
-            voice_prompt="No restaurants found in your area. Please set your location first.",
-        )
-
-    # --- Browse category by name or id ---
-    if lower.startswith("category:") or lower.startswith("browse:"):
-        cat_query = cleaned.split(":", 1)[1].strip()
-        # If session has a restaurant_id, scope to it
-        if session.restaurant_id:
-            categories = crud.list_categories(db, session.restaurant_id)
-        else:
-            categories = []
-        match = None
-        for cat in categories:
-            if str(cat.id) == cat_query or cat.name.lower() == cat_query.lower():
-                match = cat
-                break
-        # Fallback: try to find category by ID directly
-        if not match and cat_query.isdigit():
-            from .models import MenuCategory as CatModel
-            direct_cat = db.query(CatModel).filter(CatModel.id == int(cat_query)).first()
-            if direct_cat:
-                # Only accept the category if it belongs to the current restaurant
-                # (prevents cross-restaurant menu leaks)
-                if session.restaurant_id and direct_cat.restaurant_id != session.restaurant_id:
-                    direct_cat = None  # Wrong restaurant — ignore
-                if direct_cat:
-                    match = direct_cat
-                    # Also fix the session restaurant_id if it was missing
-                    if not session.restaurant_id:
-                        _set_session_state(db, session, restaurant_id=direct_cat.restaurant_id)
-                        categories = crud.list_categories(db, direct_cat.restaurant_id)
-        if match:
-            _set_session_state(db, session, category_id=match.id)
-            items = _items_data(db, match.id)
-            cats = _categories_data(db, session.restaurant_id or match.restaurant_id)
-            return _result(
-                f"{match.name} — {len(items)} items. Tap + to add or just tell me what you want!",
-                restaurant_id=session.restaurant_id,
-                category_id=match.id,
-                order_id=session.order_id,
-                categories=cats,
-                items=items,
-                voice_prompt=f"{match.name}, {len(items)} items. Which one?",
-            )
-
-    # --- Quick add by item ID (from tapping + button) ---
-    quick_add = re.match(r'^add:(\d+)(?::(\d+))?$', lower)
-    if quick_add:
-        item_id = int(quick_add.group(1))
-        quantity = int(quick_add.group(2) or 1)
-        all_items = _get_all_restaurant_items(db, session.restaurant_id)
-        menu_item = next((i for i in all_items if i.id == item_id), None)
-        if menu_item:
+    # 2. Fast-path System Commands to avoid LLM tokens / latency
+    if cleaned.startswith("category:"):
+        try:
+            cat_id = int(cleaned.split(":")[1])
+            _set_session_state(db, session, category_id=cat_id)
+            items = _items_data(db, cat_id)
+            # Find category name gently
+            from .models import MenuCategory
+            cat = db.query(MenuCategory).filter(MenuCategory.id == cat_id).first()
+            name = cat.name if cat else "Category"
+            return _result(f"Here are the items for {name}.", restaurant_id=session.restaurant_id, category_id=cat_id, items=items, voice_prompt=f"Here is the {name} menu.")
+        except Exception:
+            pass  # Fall through to LLM if malformed
+            
+    if cleaned.startswith("add:"):
+        try:
+            parts = cleaned.split(":")
+            item_id = int(parts[1])
+            qty = int(parts[2]) if len(parts) > 2 else 1
+            if not session.restaurant_id:
+                return _result("Please pick a restaurant first!")
             order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
             if not order:
                 order = crud.create_order(db, session.user_id, session.restaurant_id)
             crud.attach_order_to_session(db, session, order)
+            mi = db.query(MenuItem).filter(MenuItem.id == item_id).first()
+            if mi:
+                crud.add_order_item(db, order, mi, qty)
+                crud.recompute_order_total(db, order)
+                cart = _build_cart_summary_chat(db, session.user_id)
+                return _result(f"Added {qty}x {mi.name}.", restaurant_id=session.restaurant_id, order_id=order.id, cart_summary=cart)
+        except Exception:
+            pass  # Fall through
 
-            order_item = crud.add_order_item(db, order, menu_item, quantity)
-            crud.recompute_order_total(db, order)
-            total = f"${order.total_cents / 100:.2f}"
-            qty_msg = f" Now {order_item.quantity}x in cart." if order_item.quantity > 1 else ""
-            cart = _build_cart_summary_chat(db, session.user_id)
-            return _result(
-                f"Added {quantity}x {menu_item.name}!{qty_msg} Cart total: {total}",
-                restaurant_id=session.restaurant_id,
-                order_id=order.id,
-                cart_summary=cart,
-                voice_prompt=f"Added {menu_item.name}. Total is {total}. Want anything else, or say done?",
-            )
-        return _result(
-            "Item not found.",
-            restaurant_id=session.restaurant_id,
-            voice_prompt="I couldn't find that item. What would you like to add?",
-        )
-
-    # --- Smart matching: try items FIRST, then categories ---
-    # Uses Sarvam AI LLM as fallback when fuzzy matching isn't confident
-    print(f"[MATCH DEBUG] raw='{text}' cleaned='{cleaned}' lower='{lower}' session.category_id={session.category_id} session.restaurant_id={session.restaurant_id}")
-    all_items = _get_all_restaurant_items(db, session.restaurant_id)
-    input_words = lower.split()
-
-    # PRIORITY CHECK: If input exactly matches a category name, skip item matching
-    # This prevents "chat" from matching "Samosa Chaat" as an item
-    # while still allowing "samosa chat" (multi-word) to match items first
-    categories = crud.list_categories(db, session.restaurant_id)
-    exact_cat_match = None
-    for cat in categories:
-        if cat.name.lower() == lower:
-            exact_cat_match = cat
-            break
-
-    # Only do item matching if input does NOT exactly match a category name
-    item_parsed = []
-    if not exact_cat_match:
-        # Step 0: If user is already in a category, try matching within THAT category first
-        # This prevents "samosa chat" from re-matching category "Chat" when user is already viewing Chat items
-        category_items = []
-        if session.category_id:
-            category_items = [i for i in all_items if i.category_id == session.category_id]
-
-        # Step 1a: Try fuzzy item matching within current category first
-        if category_items:
-            item_parsed = _parse_order_items(cleaned, category_items)
-            if not item_parsed:
-                single = _find_best_item(cleaned, category_items)
-                if single:
-                    item_parsed = [(single, 1)]
-            # Step 1b: Try LLM matching within current category
-            if not item_parsed:
-                llm_item = _llm_match_item(cleaned, category_items)
-                if llm_item:
-                    item_parsed = [(llm_item, 1)]
-
-        # Step 2: If not found in current category, try ALL restaurant items
-        if not item_parsed:
-            item_parsed = _parse_order_items(cleaned, all_items)
-            if not item_parsed:
-                single = _find_best_item(cleaned, all_items)
-                if single:
-                    item_parsed = [(single, 1)]
-
-        # Step 3: LLM fallback on all items
-        if not item_parsed:
-            llm_item = _llm_match_item(cleaned, all_items)
-            if llm_item:
-                item_parsed = [(llm_item, 1)]
-
-    if item_parsed:
-        # Found an item match — add to cart
+    # 3. Extract structured JSON action from LLM Router
+    action_payload = extract_unified_intent(cleaned, all_rests, current_rest, current_menu, cart_ctx)
+    action = action_payload.get("action", "CHAT")
+    
+    # 3. Handle Actions blindly based on JSON
+    if action == "ADD_ITEMS":
+        if not session.restaurant_id:
+            return _result("Please pick a restaurant first!", voice_prompt="Please pick a restaurant first.")
+        
         order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
         if not order:
             order = crud.create_order(db, session.user_id, session.restaurant_id)
         crud.attach_order_to_session(db, session, order)
-        added_lines, added_names = [], []
-        for menu_item, qty in item_parsed:
-            crud.add_order_item(db, order, menu_item, qty)
-            price = f"${menu_item.price_cents * qty / 100:.2f}"
-            added_lines.append(f"  {qty}x {menu_item.name} - {price}")
-            added_names.append(menu_item.name)
+
+        added_names = []
+        for item_req in action_payload.get("items", []):
+            mi = db.query(MenuItem).filter(MenuItem.id == item_req.get("item_id")).first()
+            if mi:
+                qty = item_req.get("quantity", 1)
+                crud.add_order_item(db, order, mi, qty)
+                added_names.append(f"{qty}x {mi.name}")
+        
+        if not added_names:
+            return _result("I couldn't find those items on the menu.", voice_prompt="I couldn't find those items.")
+
         crud.recompute_order_total(db, order)
         total = f"${order.total_cents / 100:.2f}"
-        reply = "Added to your order:\n" + "\n".join(added_lines)
-        reply += f"\n\nCart total: {total}"
-        cart = _build_cart_summary_chat(db, session.user_id)
-        voice_added = ", ".join(added_names)
-        return _result(
-            reply,
-            restaurant_id=session.restaurant_id,
-            order_id=order.id,
-            cart_summary=cart,
-            voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
-        )
+        reply = f"Added {', '.join(added_names)}.\\nCart total: {total}"
+        cart_summary = _build_cart_summary_chat(db, session.user_id)
+        
+        # Clean up TTS phrasing like "1x Chicken" to "1 Chicken"
+        spoken = ", ".join([n.replace('1x ', '').replace('x ', ' ') for n in added_names])
+        voice = f"Added {spoken}. Total {total}."
+        
+        return _result(reply, restaurant_id=session.restaurant_id, order_id=order.id, cart_summary=cart_summary, voice_prompt=voice)
 
-    # --- Category matching (only if item didn't match) ---
-    categories = crud.list_categories(db, session.restaurant_id)
-    cat_match = None
+    elif action == "REMOVE_ITEMS":
+        if action_payload.get("clear_cart"):
+            for order in pending_orders:
+                for oi in order.items:
+                    db.delete(oi)
+                db.delete(order)
+            db.commit()
+            _set_session_state(db, session, order_id=None)
+            return _result("I've cleared your cart.", cart_summary=_build_cart_summary_chat(db, session.user_id), voice_prompt="I've cleared your cart.")
+        
+        item_ids_to_remove = set(action_payload.get("item_ids", []))
+        removed_names = []
+        for order in pending_orders:
+            for oi in list(order.items):  # use list to iterate safely during deletion
+                if oi.menu_item_id in item_ids_to_remove:
+                    mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
+                    removed_names.append(mi.name if mi else "item")
+                    crud.remove_order_item(db, order, oi.id)
+                    
+        if not removed_names:
+            cart = _build_cart_summary_chat(db, session.user_id)
+            return _result("I couldn't find that item in your cart.", voice_prompt="I couldn't find that in your cart.", cart_summary=cart)
+            
+        cart_summary = _build_cart_summary_chat(db, session.user_id)
+        reply = f"Removed {', '.join(removed_names)}."
+        return _result(reply, cart_summary=cart_summary, voice_prompt=reply)
 
-    # Pass 1: Exact match only (input matches category name exactly)
-    for cat in categories:
-        if cat.name.lower() == lower or str(cat.id) == lower:
-            cat_match = cat
-            break
-
-    # Pass 2: Single-word partial match ONLY
-    # For multi-word inputs like "samosa chat", DO NOT match category "Chat"
-    # because the user is clearly asking for a menu item, not a category
-    if not cat_match and len(input_words) == 1:
-        for cat in categories:
-            cat_lower = cat.name.lower()
-            cat_words = [w.strip() for w in cat_lower.replace("/", " ").split()]
-            iw = input_words[0]
-            for cw in cat_words:
-                if len(iw) >= 3 and (iw in cw or cw in iw):
-                    cat_match = cat
-                    break
-                if len(iw) >= 3 and _similarity(iw, cw) >= 0.75:
-                    cat_match = cat
-                    break
-            if cat_match:
-                break
-
-    # Pass 3: Fuzzy match on full name
-    # For multi-word inputs, only compare full input vs full category name
-    # (prevents "samosa chat" from matching category "Chat" via per-word similarity)
-    if not cat_match:
-        best_cat, best_score = None, 0.0
-        for cat in categories:
-            cat_lower = cat.name.lower()
-            score = _similarity(lower, cat_lower)
-            # Only do per-word matching for SINGLE-word inputs
-            if len(input_words) == 1:
-                for word in cat_lower.replace("/", " ").split():
-                    word = word.strip()
-                    if word:
-                        score = max(score, _similarity(lower, word))
-            if score > best_score:
-                best_score = score
-                best_cat = cat
-        if best_score >= 0.55:
-            cat_match = best_cat
-
-    if cat_match:
-        _set_session_state(db, session, category_id=cat_match.id)
-        items = _items_data(db, cat_match.id)
-        item_list = _build_voice_item_list(items)
-        return _result(
-            f"{cat_match.name} — {len(items)} items. Tap + to add or just tell me what you want!",
-            restaurant_id=session.restaurant_id,
-            category_id=cat_match.id,
-            order_id=session.order_id,
-            items=items,
-            voice_prompt=f"{cat_match.name}. Which one would you like?",
-        )
-
-    # Fuzzy category match failed — try LLM category matching
-    if not cat_match:
-        llm_cat = _llm_match_category(cleaned, categories)
-        if llm_cat:
-            _set_session_state(db, session, category_id=llm_cat.id)
-            items = _items_data(db, llm_cat.id)
-            item_list = _build_voice_item_list(items)
-            return _result(
-                f"{llm_cat.name} — {len(items)} items. Tap + to add or just tell me what you want!",
-                restaurant_id=session.restaurant_id,
-                category_id=llm_cat.id,
-                order_id=session.order_id,
-                items=items,
-                voice_prompt=f"{llm_cat.name}. Which one would you like?",
-            )
-
-    # --- Show menu / categories ---
-    if lower in ("menu", "show menu", "categories", "show categories", "what do you have"):
-        cats = _categories_data(db, session.restaurant_id)
-        cat_list = _build_voice_category_list(cats)
-        return _result(
-            "Here are the categories. Tap one to browse!",
-            restaurant_id=session.restaurant_id,
-            order_id=session.order_id,
-            categories=cats,
-            voice_prompt=f"We have these categories: {cat_list}. Which one would you like?",
-        )
-
-    # --- Submit order ---
-    if lower in ("#order", "submit", "submit order", "place order", "done",
-                 "checkout", "check out", "that's all", "thats all", "confirm",
-                 "place my order", "send order", "i'm done", "im done",
-                 "finished", "that is all", "no more", "nothing else"):
+    elif action == "CHECKOUT":
         if session.order_id is None:
-            cats = _categories_data(db, session.restaurant_id)
-            cat_list = _build_voice_category_list(cats)
-            return _result(
-                "Your cart is empty! Pick a category or tell me what you want.",
-                restaurant_id=session.restaurant_id,
-                voice_prompt=f"Your cart is empty. We have: {cat_list}. What would you like to order?",
-            )
+            return _result("Your cart is empty!", voice_prompt="Your cart is empty.")
         order = crud.get_order(db, session.order_id)
         if not order:
             _set_session_state(db, session, order_id=None)
-            return _result(
-                "Cart not found. Tell me what you want to order!",
-                restaurant_id=session.restaurant_id,
-                voice_prompt="Your cart seems empty. What would you like to order?",
-            )
+            return _result("Cart not found.", voice_prompt="Cart not found.")
         order.status = "submitted"
         db.commit()
         total = f"${order.total_cents / 100:.2f}"
-        return _result(
-            f"Order #{order.id} submitted! Total: {total}. Your order has been sent to the restaurant!",
-            restaurant_id=session.restaurant_id,
-            order_id=order.id,
-            voice_prompt=f"Your order has been placed! Total is {total}. Thank you!",
-        )
+        return _result(f"Order submitted! Total: {total}", restaurant_id=session.restaurant_id, order_id=order.id, voice_prompt=f"Your order has been placed! Total is {total}.")
 
-    # --- View cart (multi-restaurant) ---
-    if lower in ("cart", "my cart", "show cart", "view cart", "what's in my cart"):
-        pending_orders = crud.get_user_pending_orders(db, session.user_id)
-        if not pending_orders:
-            return _result(
-                "Your cart is empty! Just tell me what you want.",
-                restaurant_id=session.restaurant_id,
-                voice_prompt="Your cart is empty. What would you like to order?",
-            )
-        lines = ["🛒 **Your Cart:**\n"]
-        grand_total = 0
-        item_names_for_voice = []
-        from .models import Restaurant as RestModel
-        for order in pending_orders:
-            if not order.items:
-                continue
-            rest = db.query(RestModel).filter(RestModel.id == order.restaurant_id).first()
-            rest_name = rest.name if rest else "Unknown"
-            lines.append(f"**{rest_name}:**")
-            for oi in order.items:
-                mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
-                name = mi.name if mi else f"Item #{oi.menu_item_id}"
-                lines.append(f"  {oi.quantity}x {name} - ${oi.price_cents * oi.quantity / 100:.2f}")
-                item_names_for_voice.append(f"{oi.quantity} {name}")
-            lines.append(f"  Subtotal: ${order.total_cents / 100:.2f}\n")
-            grand_total += order.total_cents
-        if grand_total == 0:
-            return _result(
-                "Your cart is empty!",
-                restaurant_id=session.restaurant_id,
-                voice_prompt="Your cart is empty. What would you like to order?",
-            )
-        lines.append(f"**Grand Total: ${grand_total / 100:.2f}**")
-        lines.append('\nSay "submit" to place your order!')
+    elif action == "SWITCH_RESTAURANT":
+        slug = action_payload.get("restaurant_slug")
+        matched = next((r for r in all_rests if r.slug == slug), None)
+        if matched:
+            _set_session_state(db, session, restaurant_id=matched.id, category_id=None)
+            categories = _categories_data(db, matched.id)
+            cat_list = _build_voice_category_list(categories)
+            prompt = f"Welcome to {matched.name}. We have {cat_list}. What would you like?" if categories else f"Welcome to {matched.name}."
+            return _result(f"Switched to **{matched.name}**!", restaurant_id=matched.id, categories=categories, voice_prompt=prompt)
+        return _result("I couldn't find that restaurant.", voice_prompt="I couldn't find that restaurant.")
+
+    elif action == "VIEW_CART":
         cart = _build_cart_summary_chat(db, session.user_id)
-        total_str = f"${grand_total / 100:.2f}"
-        voice_items = ", ".join(item_names_for_voice[:4])
-        return _result(
-            "\n".join(lines),
-            restaurant_id=session.restaurant_id,
-            order_id=session.order_id,
-            cart_summary=cart,
-            voice_prompt=f"Your cart has: {voice_items}. Total is {total_str}. Say done to place the order, or add more items.",
-        )
+        if not pending_orders:
+            return _result("Your cart is empty!", restaurant_id=session.restaurant_id, voice_prompt="Your cart is empty. What would you like to order?")
+        
+        # Build nice TTS cart rundown
+        item_names = []
+        for o in pending_orders:
+            for oi in o.items:
+                mi = db.query(MenuItem).filter(MenuItem.id == oi.menu_item_id).first()
+                if mi:
+                    item_names.append(f"{oi.quantity} {mi.name}")
+        spoken_cart = ", ".join(item_names[:3])
+        if len(item_names) > 3: spoken_cart += " and more"
+        return _result("Here's your cart.", restaurant_id=session.restaurant_id, cart_summary=cart, voice_prompt=f"You have {spoken_cart}. Say submit order to checkout.")
 
+    elif action == "SHOW_MENU":
+        cats = _categories_data(db, session.restaurant_id) if session.restaurant_id else []
+        if active_cat_id := action_payload.get("category_id"):
+            mi = _items_data(db, active_cat_id)
+            return _result("Here's that category.", restaurant_id=session.restaurant_id, category_id=active_cat_id, items=mi, voice_prompt="Here is the category menu.")
+        cat_list = _build_voice_category_list(cats) if cats else "nothing right now"
+        return _result("Here are the categories.", restaurant_id=session.restaurant_id, categories=cats, voice_prompt=f"We have these categories: {cat_list}.")
 
-    # --- Natural language ordering ---
-    all_items = _get_all_restaurant_items(db, session.restaurant_id)
-    parsed = _parse_order_items(cleaned, all_items)
+    elif action == "MULTI_ORDER":
+        return _result("Routing you to multi-order...", client_action="ROUTE_MULTI_ORDER", client_query=action_payload.get("query"))
 
-    if not parsed:
-        single_match = _find_best_item(cleaned, all_items)
-        if single_match:
-            parsed = [(single_match, 1)]
+    elif action == "MEAL_PLAN":
+        return _result("Generating meal plan...", client_action="ROUTE_MEAL_PLAN", client_query=action_payload.get("query"))
 
-    if not parsed:
-        # Try search and show matching items for disambiguation
-        matches = _find_matching_items(cleaned, all_items)
-        if matches:
-            items_data = [
-                {
-                    "id": m.id,
-                    "name": m.name,
-                    "description": m.description or "",
-                    "price_cents": m.price_cents,
-                }
-                for m in matches
-            ]
-            match_names = ", ".join(m.name for m in matches[:3])
-            return _result(
-                f'Found {len(matches)} items matching "{cleaned}". Tap + to add!',
-                restaurant_id=session.restaurant_id,
-                order_id=session.order_id,
-                items=items_data,
-                voice_prompt=f"Did you mean: {match_names}? Please say the exact item name.",
-            )
+    elif action == "PRICE_COMPARE":
+        return _result("Searching globally...", client_action="ROUTE_PRICE_COMPARE", client_query=action_payload.get("query"))
 
-        # Show categories as fallback
-        cats = _categories_data(db, session.restaurant_id)
-        cat_list = _build_voice_category_list(cats)
-        return _result(
-            "I didn't catch that. Pick a category or type what you want!",
-            restaurant_id=session.restaurant_id,
-            order_id=session.order_id,
-            categories=cats,
-            voice_prompt=f"I didn't catch that. Our categories are: {cat_list}. Which one would you like?",
-        )
-
-    # Create or get order (per-restaurant)
-    order = crud.get_user_order_for_restaurant(db, session.user_id, session.restaurant_id)
-    if not order:
-        order = crud.create_order(db, session.user_id, session.restaurant_id)
-    crud.attach_order_to_session(db, session, order)
-
-    added_lines = []
-    added_names = []
-    for menu_item, qty in parsed:
-        crud.add_order_item(db, order, menu_item, qty)
-        price = f"${menu_item.price_cents * qty / 100:.2f}"
-        added_lines.append(f"  {qty}x {menu_item.name} - {price}")
-        added_names.append(menu_item.name)
-
-    crud.recompute_order_total(db, order)
-    total = f"${order.total_cents / 100:.2f}"
-    reply = "Added to your order:\n" + "\n".join(added_lines)
-    reply += f"\n\nCart total: {total}"
-
-    cart = _build_cart_summary_chat(db, session.user_id)
-    voice_added = ", ".join(added_names)
-    return _result(
-        reply,
-        restaurant_id=session.restaurant_id,
-        order_id=order.id,
-        cart_summary=cart,
-        voice_prompt=f"Added {voice_added}. Your total is {total}. Would you like anything else, or say done to finish?",
-    )
+    else:
+        # Action CHAT or unknown
+        reply = action_payload.get("reply", "I didn't quite catch that. What would you like to order?")
+        return _result(reply, voice_prompt=reply)
